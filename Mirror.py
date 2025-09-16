@@ -160,7 +160,10 @@ if "db_initialized" not in st.session_state:
     st.session_state.db_initialized = False
 if "secrets_error" not in st.session_state:
     st.session_state.secrets_error = None
-
+# 初始化 user_session_id，如果还没有设置的话
+if 'user_session_id' not in st.session_state:
+    # 先设置为一个临时值，等待JavaScript代码更新它
+    st.session_state.user_session_id = "pending_js_session_id"
 # 然后，尝试从浏览器本地存储或数据库加载历史记录
 if "messages" not in st.session_state:
     # 尝试生成或获取一个用户会话ID
