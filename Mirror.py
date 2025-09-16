@@ -1,6 +1,7 @@
 import streamlit as st
 from openai import OpenAI
 import time
+from streamlit.components.v1 import experimental_connection 
 
 # --- 新增的Firebase导入和初始化 ---
 import firebase_admin
