@@ -1,7 +1,6 @@
 import streamlit as st
 from openai import OpenAI
 import time
-import streamlit.components.v1 as components
 
 # --- 新增的Firebase导入和初始化 ---
 import firebase_admin
@@ -53,33 +52,44 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- JavaScript 消息处理 ----------------------------
-# 这部分代码必须放在最前面，确保能捕获到页面加载时发送的消息
-session_id_script = """
-<script>
-// 监听从 iframe 发送的消息
-window.addEventListener('message', function(event) {
-    // 确保只处理我们关心的消息类型
-    if (event.data.type === 'STREAMLIT_SESSION_ID') {
-        // 将 sessionId 发送到 Streamlit 后端
-        window.parent.postMessage({
-            type: 'streamlit:setComponentValue',
-            value: event.data.sessionId
-        }, '*');
+# ---------------------------- 会话 ID 管理 ----------------------------
+def get_or_create_session_id():
+    """获取或创建持久化的会话 ID"""
+    # 尝试从查询参数获取会话 ID
+    if 'session_id' in st.query_params:
+        session_id = st.query_params['session_id']
+        # 将获取到的会话 ID 保存到本地存储
+        save_session_id_script = f"""
+        <script>
+        localStorage.setItem('mirror_session_id', '{session_id}');
+        </script>
+        """
+        components.html(save_session_id_script, height=0, width=0)
+        return session_id
+    
+    # 尝试从本地存储获取会话 ID
+    get_session_id_script = """
+    <script>
+    var sessionId = localStorage.getItem('mirror_session_id');
+    if (sessionId) {
+        // 将会话 ID 设置到 URL
+        window.history.replaceState(null, null, '?session_id=' + sessionId);
+        // 重新加载页面以使用新的 URL
+        window.location.reload();
+    } else {
+        // 创建新的会话 ID
+        var newSessionId = Math.random().toString(36).substring(2) + Date.now().toString(36);
+        localStorage.setItem('mirror_session_id', newSessionId);
+        window.history.replaceState(null, null, '?session_id=' + newSessionId);
+        window.location.reload();
     }
-});
-</script>
-"""
-
-# 创建一个组件来接收 JavaScript 消息
-session_id = components.html(session_id_script, height=0, width=0, key='session_id_listener')
-
-# 如果收到了从 JavaScript 传来的会话 ID，使用它
-if session_id:
-    st.session_state.user_session_id = session_id
-    # 同时也设置到 URL 参数中，作为备份
-    st.query_params["session_id"] = session_id
-
+    </script>
+    """
+    
+    components.html(get_session_id_script, height=0, width=0)
+    # 返回一个临时值，页面重载后会被替换
+    return "temp_session_id_until_reload"
+    
 # ---------------------------- 自定义CSS ----------------------------
 st.markdown("""
 <style>
@@ -156,14 +166,18 @@ if "messages" not in st.session_state:
     # 尝试生成或获取一个用户会话ID
     if 'user_session_id' not in st.session_state:
         try:
-            query_params = st.query_params
-            if 'session_id' in query_params:
-                st.session_state.user_session_id = query_params['session_id'][0]
-            else:
-                st.session_state.user_session_id = str(uuid4())
-                st.query_params["session_id"] = st.session_state.user_session_id
-        except:
+            # 使用我们的新函数获取或创建会话 ID
+            st.session_state.user_session_id = get_or_create_session_id()
+            
+            # 如果是临时 ID，显示加载提示
+            if st.session_state.user_session_id == "temp_session_id_until_reload":
+                st.info("正在初始化会话...")
+                st.stop()  # 停止执行，等待页面重载
+        except Exception as e:
+            st.sidebar.error(f"会话初始化错误: {e}")
+            # 回退到 UUID 方法
             st.session_state.user_session_id = str(uuid4())
+            st.query_params["session_id"] = st.session_state.user_session_id
 
     # 尝试从数据库加载（只有在前面的基本状态初始化完成后才进行这步）
     loaded_history = False
@@ -187,55 +201,6 @@ if "messages" not in st.session_state:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "assistant", "content": OPENING_TEMPLATE}
         ]
-
-    if 'user_session_id' not in st.session_state:
-        try:
-            # 尝试从浏览器本地存储 (localStorage) 获取会话 ID
-            get_session_id_script = """
-            <script>
-            function getSessionId() {
-                // 尝试从 localStorage 读取
-                let sessionId = localStorage.getItem('mirror_session_id');
-                
-                // 如果没有，就生成一个新的并保存
-                if (!sessionId) {
-                    sessionId = Math.random().toString(36).substring(2) + Date.now().toString(36);
-                    localStorage.setItem('mirror_session_id', sessionId);
-                }
-                
-                // 将 sessionId 发送回 Streamlit
-                window.parent.postMessage({
-                    type: 'STREAMLIT_SESSION_ID',
-                    sessionId: sessionId
-                }, '*');
-            }
-            
-            // 页面加载后执行
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', getSessionId);
-            } else {
-                getSessionId();
-            }
-            </script>
-            """
-            
-            # 执行 JavaScript 代码
-            components.html(get_session_id_script, height=0, width=0, key='get_session_id_script')
-            
-            # 设置一个默认值，防止后续代码出错
-            st.session_state.user_session_id = "default_id_until_js_loaded"
-            
-        except Exception as e:
-            # 如果上述方法失败，回退到原始方法
-            st.sidebar.warning("使用 localStorage 存储会话 ID 失败，使用备用方案")
-            try:
-                if 'session_id' in st.query_params:
-                    st.session_state.user_session_id = st.query_params['session_id']
-                else:
-                    st.session_state.user_session_id = str(uuid4())
-                    st.query_params["session_id"] = st.session_state.user_session_id
-            except:
-                st.session_state.user_session_id = str(uuid4())
     
 # ------------------------------API密钥设置--------------------------------
 # 确保每次运行时都检查 Secrets
@@ -295,38 +260,23 @@ with st.sidebar:
     2. 开始与认知镜子对话
     3. 如果需要中断AI的当前回应，可以刷新页面
     """)
-
-    st.divider()
-    if st.button("🚨 运行诊断"):
-        st.write("### Firebase 诊断报告")
-        
-        # 测试1: 检查初始化状态
-        st.write("**1. Firebase 初始化状态:**", 
-                 "✅ 成功" if st.session_state.get('db_initialized') else "❌ 失败")
-        
-        if st.session_state.get('db_initialized'):
-            # 测试2: 尝试写入一个测试文档
-            try:
-                test_ref = db.collection("diagnostics").document("test")
-                test_ref.set({"test_time": firestore.SERVER_TIMESTAMP})
-                st.write("**2. 写入测试:** ✅ 成功")
-                
-                # 测试3: 尝试读取测试文档
-                test_doc = test_ref.get()
-                if test_doc.exists:
-                    st.write("**3. 读取测试:** ✅ 成功")
-                else:
-                    st.write("**3. 读取测试:** ❌ 失败 - 文档不存在")
-                    
-                # 测试4: 清理测试文档
-                test_ref.delete()
-                st.write("**4. 清理测试:** ✅ 完成")
-                
-            except Exception as e:
-                st.write(f"**2-4. 操作测试:** ❌ 失败 - {str(e)}")
-        
-        # 显示当前会话ID
-        st.write("**5. 当前会话 ID:**", st.session_state.get('user_session_id', '未设置'))
+    
+    if st.button("🔄 创建新会话"):
+        clear_script = """
+        <script>
+        // 清除本地存储中的会话 ID
+        localStorage.removeItem('mirror_session_id');
+        // 移除 URL 中的会话参数
+        if (window.location.search.includes('session_id')) {
+            var newUrl = window.location.origin + window.location.pathname;
+            window.history.replaceState(null, null, newUrl);
+        }
+        // 刷新页面
+        window.location.reload();
+        </script>
+        """
+        components.html(clear_script, height=0, width=0)
+        st.stop()
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
