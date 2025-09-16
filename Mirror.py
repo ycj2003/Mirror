@@ -128,12 +128,12 @@ if "messages" not in st.session_state:
     # 尝试生成或获取一个用户会话ID
     if 'user_session_id' not in st.session_state:
         try:
-            query_params = st.experimental_get_query_params()
+            query_params = st.query_params
             if 'session_id' in query_params:
                 st.session_state.user_session_id = query_params['session_id'][0]
             else:
                 st.session_state.user_session_id = str(uuid4())
-                st.experimental_set_query_params(session_id=st.session_state.user_session_id)
+                st.query_params["session_id"] = st.session_state.user_session_id
         except:
             st.session_state.user_session_id = str(uuid4())
 
