@@ -279,6 +279,7 @@ with st.sidebar:
         // window.location.replace(newUrl);
         </script>
         """
+        components.html(clear_script, height=0, width=0)
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
