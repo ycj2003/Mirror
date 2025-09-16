@@ -8,6 +8,8 @@ from firebase_admin import credentials, firestore
 import json
 from uuid import uuid4
 
+import streamlit.components.v1 as components
+
 # 初始化 Firebase（只会运行一次）
 if not firebase_admin._apps:
     # 检查 Secrets 中是否有私钥
