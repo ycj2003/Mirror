@@ -165,20 +165,33 @@ if "secrets_error" not in st.session_state:
 if "messages" not in st.session_state:
     # 尝试生成或获取一个用户会话ID
     if 'user_session_id' not in st.session_state:
-        try:
-            # 使用我们的新函数获取或创建会话 ID
-            st.session_state.user_session_id = get_or_create_session_id()
-            
-            # 如果是临时 ID，显示加载提示
-            if st.session_state.user_session_id == "temp_session_id_until_reload":
-                st.info("正在初始化会话...")
-                st.stop()  # 停止执行，等待页面重载
-        except Exception as e:
-            st.sidebar.error(f"会话初始化错误: {e}")
-            # 回退到 UUID 方法
-            st.session_state.user_session_id = str(uuid4())
-            st.query_params["session_id"] = st.session_state.user_session_id
-
+    # 先尝试从URL参数获取
+        if 'session_id' in st.query_params:
+            st.session_state.user_session_id = st.query_params['session_id']
+        else:
+            # 如果没有URL参数，再尝试从本地存储获取（通过JS）
+            # 注意：这里应只获取，如果不为null则设置到URL并重载
+            # 如果本地存储也没有，才生成一个新的
+            try:
+                # 尝试通过JS获取本地存储的session_id
+                get_local_storage_script = """
+                <script>
+                var localSessionId = localStorage.getItem('mirror_session_id');
+                if (localSessionId) {
+                    window.parent.postMessage({
+                        type: 'STREAMLIT_LOCAL_SESSION_ID',
+                        value: localSessionId
+                    }, '*');
+                }
+                </script>
+                """
+                components.html(get_local_storage_script, height=0, width=0)
+                # ... 处理消息，如果收到消息则设置到 st.query_params 并重载
+            except:
+                # 最终兜底方案：生成全新ID
+                new_id = str(uuid4())
+                st.session_state.user_session_id = new_id
+                st.query_params["session_id"] = new_id
     # 尝试从数据库加载（只有在前面的基本状态初始化完成后才进行这步）
     loaded_history = False
     if st.session_state.db_initialized:  # 现在这个状态已经初始化了，可以安全地访问
@@ -262,15 +275,38 @@ with st.sidebar:
     """)
     
     if st.button("🔄 创建新会话"):
+        # 1. 显示提示信息
+        st.info("正在清理当前会话并创建新对话...")
+        
+        # 2. 清除Firestore中的历史数据（关键步骤）
+        # 假设您有delete_firestore_session函数或类似机制
+        # delete_firestore_session(st.session_state.user_session_id) 
+        
+        # 3. 清除Streamlit的session_state中的聊天历史
+        if 'messages' in st.session_state:
+            # 保留系统消息，仅清除用户和助理的对话
+            st.session_state.messages = [st.session_state.messages[0]] if st.session_state.messages else []
+        
+        # 4. 生成一个新的会话ID并更新状态和URL
+        new_session_id = str(uuid4())
+        st.session_state.user_session_id = new_session_id
+        st.query_params["session_id"] = new_session_id  # 更新URL参数
+        
+        # 5. 清除浏览器本地存储中的旧会话ID（如果使用了的话）
         clear_script = """
         <script>
         localStorage.removeItem('mirror_session_id');
-        var newUrl = window.location.origin + window.location.pathname;
-        window.history.replaceState(null, null, newUrl);
-        window.location.href = newUrl; // 或 window.location.reload(true);
         </script>
         """
         components.html(clear_script, height=0, width=0)
+        
+        # 6. 强烈建议这里不再使用st.stop()，而是直接强制刷新页面
+        force_reload_script = """
+        <script>
+        window.location.href = window.location.origin + window.location.pathname;
+        </script>
+        """
+        components.html(force_reload_script, height=0, width=0)
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
