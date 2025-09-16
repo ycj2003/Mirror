@@ -189,53 +189,53 @@ if "messages" not in st.session_state:
         ]
 
     if 'user_session_id' not in st.session_state:
-    try:
-        # 尝试从浏览器本地存储 (localStorage) 获取会话 ID
-        get_session_id_script = """
-        <script>
-        function getSessionId() {
-            // 尝试从 localStorage 读取
-            let sessionId = localStorage.getItem('mirror_session_id');
-            
-            // 如果没有，就生成一个新的并保存
-            if (!sessionId) {
-                sessionId = Math.random().toString(36).substring(2) + Date.now().toString(36);
-                localStorage.setItem('mirror_session_id', sessionId);
+        try:
+            # 尝试从浏览器本地存储 (localStorage) 获取会话 ID
+            get_session_id_script = """
+            <script>
+            function getSessionId() {
+                // 尝试从 localStorage 读取
+                let sessionId = localStorage.getItem('mirror_session_id');
+                
+                // 如果没有，就生成一个新的并保存
+                if (!sessionId) {
+                    sessionId = Math.random().toString(36).substring(2) + Date.now().toString(36);
+                    localStorage.setItem('mirror_session_id', sessionId);
+                }
+                
+                // 将 sessionId 发送回 Streamlit
+                window.parent.postMessage({
+                    type: 'STREAMLIT_SESSION_ID',
+                    sessionId: sessionId
+                }, '*');
             }
             
-            // 将 sessionId 发送回 Streamlit
-            window.parent.postMessage({
-                type: 'STREAMLIT_SESSION_ID',
-                sessionId: sessionId
-            }, '*');
-        }
-        
-        // 页面加载后执行
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', getSessionId);
-        } else {
-            getSessionId();
-        }
-        </script>
-        """
-        
-        # 执行 JavaScript 代码
-        components.html(get_session_id_script, height=0, width=0, key='get_session_id_script')
-        
-        # 设置一个默认值，防止后续代码出错
-        st.session_state.user_session_id = "default_id_until_js_loaded"
-        
-    except Exception as e:
-        # 如果上述方法失败，回退到原始方法
-        st.sidebar.warning("使用 localStorage 存储会话 ID 失败，使用备用方案")
-        try:
-            if 'session_id' in st.query_params:
-                st.session_state.user_session_id = st.query_params['session_id']
-            else:
+            // 页面加载后执行
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', getSessionId);
+            } else {
+                getSessionId();
+            }
+            </script>
+            """
+            
+            # 执行 JavaScript 代码
+            components.html(get_session_id_script, height=0, width=0, key='get_session_id_script')
+            
+            # 设置一个默认值，防止后续代码出错
+            st.session_state.user_session_id = "default_id_until_js_loaded"
+            
+        except Exception as e:
+            # 如果上述方法失败，回退到原始方法
+            st.sidebar.warning("使用 localStorage 存储会话 ID 失败，使用备用方案")
+            try:
+                if 'session_id' in st.query_params:
+                    st.session_state.user_session_id = st.query_params['session_id']
+                else:
+                    st.session_state.user_session_id = str(uuid4())
+                    st.query_params["session_id"] = st.session_state.user_session_id
+            except:
                 st.session_state.user_session_id = str(uuid4())
-                st.query_params["session_id"] = st.session_state.user_session_id
-        except:
-            st.session_state.user_session_id = str(uuid4())
     
 # ------------------------------API密钥设置--------------------------------
 # 确保每次运行时都检查 Secrets
