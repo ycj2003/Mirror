@@ -112,26 +112,34 @@ OPENING_TEMPLATE = "你好，我是一面镜子。在这里思考，亦看见你
 SYSTEM_PROMPT = BACKGROUND_SETTING + "\n" + TASK_DIRECTIVE
 # ==================== 配置结束 ====================
 
-# ---------------------------- 初始化会话状态 ----------------------------
-# ---------------------------- 初始化会话状态 ----------------------------
+# ---------------------------- 初始化所有会话状态 ----------------------------
+# 首先，确保所有可能用到的状态变量都有默认值
+if "api_key_configured" not in st.session_state:
+    st.session_state.api_key_configured = False
+if "client" not in st.session_state:
+    st.session_state.client = None
+if "db_initialized" not in st.session_state:
+    st.session_state.db_initialized = False
+if "secrets_error" not in st.session_state:
+    st.session_state.secrets_error = None
+
+# 然后，尝试从浏览器本地存储或数据库加载历史记录
 if "messages" not in st.session_state:
-    # 尝试生成或获取一个用户会话ID，用于关联聊天记录
+    # 尝试生成或获取一个用户会话ID
     if 'user_session_id' not in st.session_state:
-        # 尝试从浏览器查询参数获取，否则生成新的
         try:
             query_params = st.experimental_get_query_params()
             if 'session_id' in query_params:
                 st.session_state.user_session_id = query_params['session_id'][0]
             else:
                 st.session_state.user_session_id = str(uuid4())
-                # 设置到URL中，方便分享和刷新后保持
                 st.experimental_set_query_params(session_id=st.session_state.user_session_id)
         except:
             st.session_state.user_session_id = str(uuid4())
 
-    # 尝试从数据库加载
+    # 尝试从数据库加载（只有在前面的基本状态初始化完成后才进行这步）
     loaded_history = False
-    if st.session_state.get('db_initialized'):
+    if st.session_state.db_initialized:  # 现在这个状态已经初始化了，可以安全地访问
         try:
             doc_ref = db.collection("conversations").document(st.session_state.user_session_id)
             doc = doc_ref.get()
@@ -147,7 +155,6 @@ if "messages" not in st.session_state:
             st.sidebar.warning(f"读取存档失败: {e}")
 
     if not loaded_history:
-        # 如果数据库没数据，初始化新对话
         st.session_state.messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "assistant", "content": OPENING_TEMPLATE}
