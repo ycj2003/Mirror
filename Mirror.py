@@ -1,7 +1,6 @@
 import streamlit as st
 from openai import OpenAI
 import time
-from streamlit.components.v1 import experimental_connection 
 
 # --- 新增的Firebase导入和初始化 ---
 import firebase_admin
@@ -148,6 +147,8 @@ OPENING_TEMPLATE = "你好，我是一面镜子。在这里思考，亦看见你
 # 组装系统提示词
 SYSTEM_PROMPT = BACKGROUND_SETTING + "\n" + TASK_DIRECTIVE
 # ==================== 配置结束 ====================
+
+from streamlit.components.v1 import experimental_connection 
 
 # ---------------------------- 初始化所有会话状态 ----------------------------
 # 首先，确保所有可能用到的状态变量都有默认值
