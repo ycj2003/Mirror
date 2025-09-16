@@ -219,6 +219,38 @@ with st.sidebar:
     3. 如果需要中断AI的当前回应，可以刷新页面
     """)
 
+    st.divider()
+    if st.button("🚨 运行诊断"):
+        st.write("### Firebase 诊断报告")
+        
+        # 测试1: 检查初始化状态
+        st.write("**1. Firebase 初始化状态:**", 
+                 "✅ 成功" if st.session_state.get('db_initialized') else "❌ 失败")
+        
+        if st.session_state.get('db_initialized'):
+            # 测试2: 尝试写入一个测试文档
+            try:
+                test_ref = db.collection("diagnostics").document("test")
+                test_ref.set({"test_time": firestore.SERVER_TIMESTAMP})
+                st.write("**2. 写入测试:** ✅ 成功")
+                
+                # 测试3: 尝试读取测试文档
+                test_doc = test_ref.get()
+                if test_doc.exists:
+                    st.write("**3. 读取测试:** ✅ 成功")
+                else:
+                    st.write("**3. 读取测试:** ❌ 失败 - 文档不存在")
+                    
+                # 测试4: 清理测试文档
+                test_ref.delete()
+                st.write("**4. 清理测试:** ✅ 完成")
+                
+            except Exception as e:
+                st.write(f"**2-4. 操作测试:** ❌ 失败 - {str(e)}")
+        
+        # 显示当前会话ID
+        st.write("**5. 当前会话 ID:**", st.session_state.get('user_session_id', '未设置'))
+
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
 st.markdown('<p class="subtitle">明镜止水。</p>', unsafe_allow_html=True)
