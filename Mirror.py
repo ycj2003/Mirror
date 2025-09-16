@@ -72,9 +72,7 @@ def get_or_create_session_id():
     <script>
     var sessionId = localStorage.getItem('mirror_session_id');
     if (sessionId) {
-        // 将会话 ID 设置到 URL
         window.history.replaceState(null, null, '?session_id=' + sessionId);
-        // 重新加载页面以使用新的 URL
         window.location.reload();
     } else {
         // 创建新的会话 ID
