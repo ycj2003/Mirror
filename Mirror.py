@@ -2,6 +2,48 @@ import streamlit as st
 from openai import OpenAI
 import time
 
+# --- 新增的Firebase导入和初始化 ---
+import firebase_admin
+from firebase_admin import credentials, firestore
+import json
+from uuid import uuid4
+
+# 初始化 Firebase（只会运行一次）
+if not firebase_admin._apps:
+    # 检查 Secrets 中是否有私钥
+    if 'FIREBASE_PRIVATE_KEY' in st.secrets:
+        try:
+            # 从 Streamlit Secrets 中构建私钥字典
+            private_key_dict = {
+                "type": st.secrets["FIREBASE_TYPE"],
+                "project_id": st.secrets["FIREBASE_PROJECT_ID"],
+                "private_key_id": st.secrets["FIREBASE_PRIVATE_KEY_ID"],
+                "private_key": st.secrets["FIREBASE_PRIVATE_KEY"].replace('\\n', '\n'), # 关键：处理换行符
+                "client_email": st.secrets["FIREBASE_CLIENT_EMAIL"],
+                "client_id": st.secrets["FIREBASE_CLIENT_ID"],
+                "auth_uri": st.secrets["FIREBASE_AUTH_URI"],
+                "token_uri": st.secrets["FIREBASE_TOKEN_URI"],
+                "auth_provider_x509_cert_url": st.secrets["FIREBASE_AUTH_PROVIDER_CERT_URL"],
+                "client_x509_cert_url": st.secrets["FIREBASE_CLIENT_CERT_URL"]
+            }
+            # 使用字典初始化认证
+            cred = credentials.Certificate(private_key_dict)
+            firebase_admin.initialize_app(cred)
+            st.session_state.db_initialized = True
+        except Exception as e:
+            st.sidebar.error(f"Firebase 初始化失败: {e}")
+            st.session_state.db_initialized = False
+    else:
+        st.session_state.db_initialized = False
+else:
+    st.session_state.db_initialized = True
+
+# 获取 Firestore 客户端
+if st.session_state.get('db_initialized'):
+    db = firestore.client()
+else:
+    db = None
+
 # ---------------------------- 页面配置 ----------------------------
 st.set_page_config(
     page_title="镜子",
@@ -71,14 +113,45 @@ SYSTEM_PROMPT = BACKGROUND_SETTING + "\n" + TASK_DIRECTIVE
 # ==================== 配置结束 ====================
 
 # ---------------------------- 初始化会话状态 ----------------------------
+# ---------------------------- 初始化会话状态 ----------------------------
 if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "system", "-content": SYSTEM_PROMPT},
-        {"role": "assistant", "content": OPENING_TEMPLATE}
-    ]
-    
-if "api_key_configured" not in st.session_state:
-    st.session_state.api_key_configured = False
+    # 尝试生成或获取一个用户会话ID，用于关联聊天记录
+    if 'user_session_id' not in st.session_state:
+        # 尝试从浏览器查询参数获取，否则生成新的
+        try:
+            query_params = st.experimental_get_query_params()
+            if 'session_id' in query_params:
+                st.session_state.user_session_id = query_params['session_id'][0]
+            else:
+                st.session_state.user_session_id = str(uuid4())
+                # 设置到URL中，方便分享和刷新后保持
+                st.experimental_set_query_params(session_id=st.session_state.user_session_id)
+        except:
+            st.session_state.user_session_id = str(uuid4())
+
+    # 尝试从数据库加载
+    loaded_history = False
+    if st.session_state.get('db_initialized'):
+        try:
+            doc_ref = db.collection("conversations").document(st.session_state.user_session_id)
+            doc = doc_ref.get()
+            if doc.exists:
+                data = doc.to_dict()
+                st.session_state.messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    *data.get('history', [])
+                ]
+                st.sidebar.success("已从存档恢复对话历史！")
+                loaded_history = True
+        except Exception as e:
+            st.sidebar.warning(f"读取存档失败: {e}")
+
+    if not loaded_history:
+        # 如果数据库没数据，初始化新对话
+        st.session_state.messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "assistant", "content": OPENING_TEMPLATE}
+        ]
     
 # ------------------------------API密钥设置--------------------------------
 # 确保每次运行时都检查 Secrets
@@ -202,3 +275,17 @@ if prompt := st.chat_input("请输入您的想法..."):
     
     # 添加AI回复到历史
     st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+    # --- 新增：自动保存对话历史到数据库 ---
+    if st.session_state.get('db_initialized'):
+        try:
+            # 只保存实际对话消息，跳过系统提示词
+            messages_to_save = st.session_state.messages[1:]
+            doc_ref = db.collection("conversations").document(st.session_state.user_session_id)
+            doc_ref.set({
+                'history': messages_to_save,
+                'last_updated': firestore.SERVER_TIMESTAMP # 使用服务器时间
+            })
+            # 可以安静地成功，不需要提示用户
+        except Exception as e:
+            st.sidebar.warning("对话存档失败，但本次对话仍可继续。")
