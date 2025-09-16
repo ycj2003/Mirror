@@ -1,6 +1,7 @@
 import streamlit as st
 from openai import OpenAI
 import time
+from streamlit.components.v1 import experimental_connection
 
 # ---------------------------- 页面配置 ----------------------------
 st.set_page_config(
@@ -71,14 +72,34 @@ SYSTEM_PROMPT = BACKGROUND_SETTING + "\n" + TASK_DIRECTIVE
 # ==================== 配置结束 ====================
 
 # ---------------------------- 初始化会话状态 ----------------------------
+# 修改部分：尝试从浏览器本地存储加载历史记录
 if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "system", "-content": SYSTEM_PROMPT},
-        {"role": "assistant", "content": OPENING_TEMPLATE}
-    ]
+    # 尝试从本地存储获取
+    try:
+        # 创建一个连接对象
+        storage_conn = experimental_connection("local_storage", type="local_storage")
+        # 尝试读取 'chat_history' 键的值
+        saved_history = storage_conn.read("chat_history")
+        if saved_history and isinstance(saved_history, list):
+            # 恢复时，我们需要重新添加系统提示词
+            st.session_state.messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                *saved_history  # 展开保存的对话历史
+            ]
+            st.sidebar.success("已恢复之前的对话历史")
+        else:
+            # 如果本地存储没有，则初始化新对话
+            raise ValueError("No saved history")
+    except:
+        # 如果出错（比如第一次访问），初始化新的对话
+        st.session_state.messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "assistant", "content": OPENING_TEMPLATE}
+        ]
     
 if "api_key_configured" not in st.session_state:
     st.session_state.api_key_configured = False
+    st.session_state.client = None
     
 # ------------------------------API密钥设置--------------------------------
 # 确保每次运行时都检查 Secrets
@@ -131,12 +152,28 @@ with st.sidebar:
     else:
         st.success("已使用预配置的API密钥")
     
+    # 新增：添加一个清除聊天历史的按钮
+    st.divider()
+    if st.button("清除聊天历史"):
+        try:
+            storage_conn = experimental_connection("local_storage", type="local_storage")
+            storage_conn.write("chat_history", [])
+            st.session_state.messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "assistant", "content": OPENING_TEMPLATE}
+            ]
+            st.success("聊天历史已清除!")
+            st.rerun()
+        except:
+            st.error("清除历史失败")
+    
     st.divider()
     st.caption("""
     **使用说明:**
     1. 如需输入API密钥，请在左侧输入
     2. 开始与认知镜子对话
     3. 如果需要中断AI的当前回应，可以刷新页面
+    4. 对话历史会自动保存在浏览器中
     """)
 
 # ---------------------------- 主界面 ----------------------------
@@ -202,3 +239,12 @@ if prompt := st.chat_input("请输入您的想法..."):
     
     # 添加AI回复到历史
     st.session_state.messages.append({"role": "assistant", "content": full_response})
+    # 新增：自动保存对话历史到浏览器本地存储（只保存实际对话，不保存系统提示）
+    try:
+        storage_conn = experimental_connection("local_storage", type="local_storage")
+        # 只保存实际对话消息，跳过系统提示词
+        messages_to_save = st.session_state.messages[1:]  # 去掉系统消息
+        storage_conn.write("chat_history", messages_to_save)
+    except Exception as e:
+        # 如果保存失败，可以静默失败或显示一个不显眼的警告
+        st.sidebar.warning("对话历史可能无法在下次访问时恢复")
