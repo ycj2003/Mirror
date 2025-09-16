@@ -81,15 +81,22 @@ if "api_key_configured" not in st.session_state:
     st.session_state.api_key_configured = False
     
 # ------------------------------API密钥设置--------------------------------
-# 这段代码只在应用启动时运行一次
-if 'DEEPSEEK_API_KEY' in st.secrets:
+# 确保每次运行时都检查 Secrets
+if 'DEEPSEEK_API_KEY' in st.secrets and not st.session_state.api_key_configured:
     try:
         client = OpenAI(api_key=st.secrets['DEEPSEEK_API_KEY'], base_url="https://api.deepseek.com")
-        # ...测试密钥...
+        # 简单测试密钥是否有效
+        test_response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": "测试"}],
+            max_tokens=5
+        )
         st.session_state.api_key_configured = True
         st.session_state.client = client
+        # 成功配置后，不需要显示错误信息
     except Exception as e:
-        st.error(f"配置的API密钥无效: {str(e)}")
+        # 只在 session_state 中记录错误，不直接显示
+        st.session_state.secrets_error = str(e)
         st.session_state.api_key_configured = False
 
 # ---------------------------- 侧边栏设置 ----------------------------
