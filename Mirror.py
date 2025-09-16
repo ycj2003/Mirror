@@ -1,6 +1,7 @@
 import streamlit as st
 from openai import OpenAI
 import time
+import streamlit.components.v1 as components
 
 # --- 新增的Firebase导入和初始化 ---
 import firebase_admin
@@ -51,6 +52,33 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed"
 )
+
+# ---------------------------- JavaScript 消息处理 ----------------------------
+# 这部分代码必须放在最前面，确保能捕获到页面加载时发送的消息
+session_id_script = """
+<script>
+// 监听从 iframe 发送的消息
+window.addEventListener('message', function(event) {
+    // 确保只处理我们关心的消息类型
+    if (event.data.type === 'STREAMLIT_SESSION_ID') {
+        // 将 sessionId 发送到 Streamlit 后端
+        window.parent.postMessage({
+            type: 'streamlit:setComponentValue',
+            value: event.data.sessionId
+        }, '*');
+    }
+});
+</script>
+"""
+
+# 创建一个组件来接收 JavaScript 消息
+session_id = components.html(session_id_script, height=0, width=0, key='session_id_listener')
+
+# 如果收到了从 JavaScript 传来的会话 ID，使用它
+if session_id:
+    st.session_state.user_session_id = session_id
+    # 同时也设置到 URL 参数中，作为备份
+    st.query_params["session_id"] = session_id
 
 # ---------------------------- 自定义CSS ----------------------------
 st.markdown("""
@@ -159,6 +187,55 @@ if "messages" not in st.session_state:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "assistant", "content": OPENING_TEMPLATE}
         ]
+
+    if 'user_session_id' not in st.session_state:
+    try:
+        # 尝试从浏览器本地存储 (localStorage) 获取会话 ID
+        get_session_id_script = """
+        <script>
+        function getSessionId() {
+            // 尝试从 localStorage 读取
+            let sessionId = localStorage.getItem('mirror_session_id');
+            
+            // 如果没有，就生成一个新的并保存
+            if (!sessionId) {
+                sessionId = Math.random().toString(36).substring(2) + Date.now().toString(36);
+                localStorage.setItem('mirror_session_id', sessionId);
+            }
+            
+            // 将 sessionId 发送回 Streamlit
+            window.parent.postMessage({
+                type: 'STREAMLIT_SESSION_ID',
+                sessionId: sessionId
+            }, '*');
+        }
+        
+        // 页面加载后执行
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', getSessionId);
+        } else {
+            getSessionId();
+        }
+        </script>
+        """
+        
+        # 执行 JavaScript 代码
+        components.html(get_session_id_script, height=0, width=0, key='get_session_id_script')
+        
+        # 设置一个默认值，防止后续代码出错
+        st.session_state.user_session_id = "default_id_until_js_loaded"
+        
+    except Exception as e:
+        # 如果上述方法失败，回退到原始方法
+        st.sidebar.warning("使用 localStorage 存储会话 ID 失败，使用备用方案")
+        try:
+            if 'session_id' in st.query_params:
+                st.session_state.user_session_id = st.query_params['session_id']
+            else:
+                st.session_state.user_session_id = str(uuid4())
+                st.query_params["session_id"] = st.session_state.user_session_id
+        except:
+            st.session_state.user_session_id = str(uuid4())
     
 # ------------------------------API密钥设置--------------------------------
 # 确保每次运行时都检查 Secrets
