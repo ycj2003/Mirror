@@ -148,8 +148,6 @@ OPENING_TEMPLATE = "你好，我是一面镜子。在这里思考，亦看见你
 SYSTEM_PROMPT = BACKGROUND_SETTING + "\n" + TASK_DIRECTIVE
 # ==================== 配置结束 ====================
 
-from streamlit.components.v1 import experimental_connection 
-
 # ---------------------------- 初始化所有会话状态 ----------------------------
 # 首先，确保所有可能用到的状态变量都有默认值
 if "api_key_configured" not in st.session_state:
