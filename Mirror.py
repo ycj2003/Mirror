@@ -102,28 +102,39 @@ if 'DEEPSEEK_API_KEY' in st.secrets and not st.session_state.api_key_configured:
 # ---------------------------- 侧边栏设置 ----------------------------
 with st.sidebar:
     st.header("设置")
-    api_key = st.text_input("Deepseek API密钥", type="password", help="请输入您的Deepseek API密钥")
     
-    if api_key:
-        try:
-            # 测试API密钥是否有效
-            client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
-            test_response = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[{"role": "user", "content": "测试"}],
-                max_tokens=5
-            )
-            st.success("API密钥有效!")
-            st.session_state.api_key_configured = True
-            st.session_state.client = client
-        except Exception as e:
-            st.error(f"API密钥无效或出错: {str(e)}")
-            st.session_state.api_key_configured = False
+    # 显示 Secrets 错误信息（如果有）
+    if hasattr(st.session_state, 'secrets_error') and st.session_state.secrets_error:
+        st.error(f"预配置API密钥错误: {st.session_state.secrets_error}")
+    
+    # 只有在没有配置云端密钥时才显示输入框
+    if not st.session_state.api_key_configured:
+        api_key = st.text_input("Deepseek API密钥", type="password", help="请输入您的Deepseek API密钥")
+        
+        if api_key:
+            try:
+                client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+                test_response = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "user", "content": "测试"}],
+                    max_tokens=5
+                )
+                st.success("API密钥有效!")
+                st.session_state.api_key_configured = True
+                st.session_state.client = client
+                # 清除可能的错误信息
+                if hasattr(st.session_state, 'secrets_error'):
+                    del st.session_state.secrets_error
+            except Exception as e:
+                st.error(f"API密钥无效或出错: {str(e)}")
+                st.session_state.api_key_configured = False
+    else:
+        st.success("已使用预配置的API密钥")
     
     st.divider()
     st.caption("""
     **使用说明:**
-    1. 在左侧输入您的Deepseek API密钥
+    1. 如需输入API密钥，请在左侧输入
     2. 开始与认知镜子对话
     3. 如果需要中断AI的当前回应，可以刷新页面
     """)
