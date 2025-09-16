@@ -264,19 +264,21 @@ with st.sidebar:
     if st.button("🔄 创建新会话"):
         clear_script = """
         <script>
-        // 清除本地存储中的会话 ID
+        // 1. 清除本地存储中的会话 ID
         localStorage.removeItem('mirror_session_id');
-        // 移除 URL 中的会话参数
-        if (window.location.search.includes('session_id')) {
-            var newUrl = window.location.origin + window.location.pathname;
-            window.history.replaceState(null, null, newUrl);
-        }
-        // 刷新页面
-        window.location.reload();
+        // 2. 清除Firestore中的会话数据（可选，确保函数名和参数正确）
+        // 假设你有 window.deleteFirestoreSession 函数
+        // window.deleteFirestoreSession();
+        // 3. 强制浏览器进行硬刷新，绕过缓存
+        // 先移除URL参数，然后通过 location.reload(true) 强制刷新（注意：true 参数在某些浏览器中已废弃，但以下方法更通用）
+        var newUrl = window.location.origin + window.location.pathname;
+        window.history.replaceState(null, null, newUrl); // 替换当前历史记录，不产生新记录
+        // 一种强制刷新且尽可能避免缓存的方法
+        window.location.href = newUrl; // 赋值 href 会触发导航
+        // 或者使用 replace 方法
+        // window.location.replace(newUrl);
         </script>
         """
-        components.html(clear_script, height=0, width=0)
-        st.stop()
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
