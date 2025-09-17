@@ -153,15 +153,47 @@ SYSTEM_PROMPT = BACKGROUND_SETTING + "\n" + TASK_DIRECTIVE
 # ---------------------------- 初始化所有会话状态 ----------------------------
 # 首先，确保所有可能用到的状态变量都有默认值
 # 初始化 user_session_id
+# 初始化 user_session_id
 if 'user_session_id' not in st.session_state:
-    # 优先从URL参数获取，这是唯一可信的来源
-    if 'session_id' in st.query_params:
-        st.session_state.user_session_id = st.query_params['session_id']
-    else:
-        # 如果URL中没有，才生成一个新的并设置到URL
-        new_id = str(uuid4())
-        st.session_state.user_session_id = new_id
-        st.query_params["session_id"] = new_id
+    try:
+        # 首先尝试从 URL 参数获取
+        if 'session_id' in st.query_params:
+            st.session_state.user_session_id = st.query_params['session_id']
+            
+            # 确保这个 ID 也保存到 localStorage
+            save_script = f"""
+            <script>
+            localStorage.setItem('mirror_session_id', '{st.session_state.user_session_id}');
+            </script>
+            """
+            components.html(save_script, height=0, width=0, key='save_session_id')
+        else:
+            # 尝试从 localStorage 获取
+            get_script = """
+            <script>
+            var sessionId = localStorage.getItem('mirror_session_id');
+            if (sessionId) {
+                // 重定向到包含会话 ID 的 URL
+                var newUrl = window.location.origin + window.location.pathname + '?session_id=' + sessionId;
+                window.location.href = newUrl;
+            } else {
+                // 生成新 ID 并保存
+                var newSessionId = Math.random().toString(36).substring(2) + Date.now().toString(36);
+                localStorage.setItem('mirror_session_id', newSessionId);
+                var newUrl = window.location.origin + window.location.pathname + '?session_id=' + newSessionId;
+                window.location.href = newUrl;
+            }
+            </script>
+            """
+            components.html(get_script, height=0, width=0, key='get_session_id')
+            # 设置一个临时值，页面重定向后会被替换
+            st.session_state.user_session_id = "temp_id_until_redirect"
+            st.stop()  # 停止执行，等待页面重定向
+    except Exception as e:
+        st.sidebar.error(f"会话初始化错误: {e}")
+        # 备用方案
+        st.session_state.user_session_id = str(uuid4())
+        st.query_params["session_id"] = st.session_state.user_session_id
 
 # 然后，基于上面确定的 session_id 去初始化消息
 if "messages" not in st.session_state:
@@ -291,39 +323,20 @@ with st.sidebar:
     3. 如果需要中断AI的当前回应，可以刷新页面
     """)
     
-    if st.button("🔄 创建新对话", key="create_new_session_btn"):
-    # 1. 在清除前，可选：删除Firestore中的旧会话数据（根据您的需求）
-    # if st.session_state.get('db_initialized'):
-    #     try:
-    #         doc_ref = db.collection("conversations").document(st.session_state.user_session_id)
-    #         doc_ref.delete()
-    #     except Exception as e:
-    #         st.sidebar.error(f"删除旧会话失败: {e}")
-
-    # 2. 生成一个全新的会话ID
+    if st.button("🔄 创建新对话"):
+        # 生成新 ID
         new_session_id = str(uuid4())
         
-        # 3. 关键一步：将新ID同时设置到 session_state 和 query_params
-        st.session_state.user_session_id = new_session_id
-        st.query_params["session_id"] = new_session_id
-        
-        # 4. 完全重置对话历史到初始状态（包含系统提示和开场白）
-        st.session_state.messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "assistant", "content": OPENING_TEMPLATE}
-        ]
-        
-        # 5. 清除浏览器本地存储中的旧ID（如果您用了的话）
-        # 可以保留您的 clear_script，但移除其中的页面刷新逻辑
-        clear_storage_script = """
+        # 更新 localStorage 和重定向
+        new_session_script = f"""
         <script>
-        localStorage.removeItem('mirror_session_id');
+        localStorage.setItem('mirror_session_id', '{new_session_id}');
+        var newUrl = window.location.origin + window.location.pathname + '?session_id=' + '{new_session_id}';
+        window.location.href = newUrl;
         </script>
         """
-        components.html(clear_storage_script, height=0, width=0)
-        
-        # 6. 最重要的改变：使用 st.rerun() 而不是JS重载
-        st.rerun() # 这行代码会强制Streamlit重新运行整个脚本
+        components.html(new_session_script, height=0, width=0, key='new_session')
+        st.stop()  # 停止执行，等待页面重定向
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
