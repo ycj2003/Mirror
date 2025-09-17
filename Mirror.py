@@ -54,6 +54,31 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+#-------------------------------
+# 处理从 JavaScript 发送回来的消息
+if 'received_session_id' not in st.session_state:
+    st.session_state.received_session_id = None
+
+js_message_script = """
+<script>
+window.addEventListener('message', function(event) {
+    if (event.data.type === 'STREAMLIT_SESSION_ID') {
+        window.parent.postMessage({
+            type: 'streamlit:setComponentValue',
+            value: event.data.value
+        }, '*');
+    }
+});
+</script>
+"""
+
+received_id = components.html(js_message_script, height=0, width=0, key='message_handler')
+
+if received_id:
+    st.session_state.received_session_id = received_id
+    st.session_state.user_session_id = received_id
+    st.query_params["session_id"] = received_id
+
 # ---------------------------- 会话 ID 管理 ----------------------------
 def get_or_create_session_id():
     """获取或创建持久化的会话 ID"""
@@ -153,15 +178,47 @@ SYSTEM_PROMPT = BACKGROUND_SETTING + "\n" + TASK_DIRECTIVE
 # ---------------------------- 初始化所有会话状态 ----------------------------
 # 首先，确保所有可能用到的状态变量都有默认值
 # 初始化 user_session_id
+# 在初始化 user_session_id 的地方修改为：
 if 'user_session_id' not in st.session_state:
-    # 优先从URL参数获取，这是唯一可信的来源
-    if 'session_id' in st.query_params:
-        st.session_state.user_session_id = st.query_params['session_id']
-    else:
-        # 如果URL中没有，才生成一个新的并设置到URL
-        new_id = str(uuid4())
-        st.session_state.user_session_id = new_id
-        st.query_params["session_id"] = new_id
+    try:
+        # 尝试从 localStorage 获取会话 ID 的脚本
+        get_id_script = """
+        <script>
+        // 尝试从 localStorage 获取
+        var savedSessionId = localStorage.getItem('mirror_session_id');
+        
+        if (savedSessionId) {
+            // 如果找到了，发送回 Streamlit
+            window.parent.postMessage({
+                type: 'STREAMLIT_SESSION_ID',
+                value: savedSessionId
+            }, '*');
+        } else {
+            // 如果没有，生成一个新的
+            var newSessionId = Math.random().toString(36).substring(2) + Date.now().toString(36);
+            localStorage.setItem('mirror_session_id', newSessionId);
+            window.parent.postMessage({
+                type: 'STREAMLIT_SESSION_ID',
+                value: newSessionId
+            }, '*');
+        }
+        </script>
+        """
+        
+        # 执行脚本
+        session_id = components.html(get_id_script, height=0, width=0, key='get_session_id')
+        
+        if session_id:
+            st.session_state.user_session_id = session_id
+            st.query_params["session_id"] = session_id
+        else:
+            raise Exception("未能从 localStorage 获取会话 ID")
+            
+    except Exception as e:
+        st.sidebar.error(f"会话初始化失败: {e}")
+        # 备用方案：使用 UUID
+        st.session_state.user_session_id = str(uuid4())
+        st.query_params["session_id"] = st.session_state.user_session_id
 
 # 然后，基于上面确定的 session_id 去初始化消息
 if "messages" not in st.session_state:
@@ -291,39 +348,30 @@ with st.sidebar:
     3. 如果需要中断AI的当前回应，可以刷新页面
     """)
     
-    if st.button("🔄 创建新对话", key="create_new_session_btn"):
-    # 1. 在清除前，可选：删除Firestore中的旧会话数据（根据您的需求）
-    # if st.session_state.get('db_initialized'):
-    #     try:
-    #         doc_ref = db.collection("conversations").document(st.session_state.user_session_id)
-    #         doc_ref.delete()
-    #     except Exception as e:
-    #         st.sidebar.error(f"删除旧会话失败: {e}")
-
-    # 2. 生成一个全新的会话ID
+    if st.button("🔄 创建新对话"):
+    # 生成新 ID
         new_session_id = str(uuid4())
         
-        # 3. 关键一步：将新ID同时设置到 session_state 和 query_params
+        # 更新所有地方的会话 ID
         st.session_state.user_session_id = new_session_id
         st.query_params["session_id"] = new_session_id
         
-        # 4. 完全重置对话历史到初始状态（包含系统提示和开场白）
+        # 更新 localStorage
+        update_storage_script = f"""
+        <script>
+        localStorage.setItem('mirror_session_id', '{new_session_id}');
+        </script>
+        """
+        components.html(update_storage_script, height=0, width=0)
+        
+        # 重置消息历史
         st.session_state.messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "assistant", "content": OPENING_TEMPLATE}
         ]
         
-        # 5. 清除浏览器本地存储中的旧ID（如果您用了的话）
-        # 可以保留您的 clear_script，但移除其中的页面刷新逻辑
-        clear_storage_script = """
-        <script>
-        localStorage.removeItem('mirror_session_id');
-        </script>
-        """
-        components.html(clear_storage_script, height=0, width=0)
-        
-        # 6. 最重要的改变：使用 st.rerun() 而不是JS重载
-        st.rerun() # 这行代码会强制Streamlit重新运行整个脚本
+        # 重新运行
+        st.rerun()
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
