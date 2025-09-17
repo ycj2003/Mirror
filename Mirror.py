@@ -166,7 +166,7 @@ if 'user_session_id' not in st.session_state:
             localStorage.setItem('mirror_session_id', '{st.session_state.user_session_id}');
             </script>
             """
-            components.html(save_script, height=0, width=0, key='save_session_id')
+            components.html(save_script, height=0, width=0)
         else:
             # 尝试从 localStorage 获取
             get_script = """
@@ -185,7 +185,7 @@ if 'user_session_id' not in st.session_state:
             }
             </script>
             """
-            components.html(get_script, height=0, width=0, key='get_session_id')
+            components.html(get_script, height=0, width=0)
             # 设置一个临时值，页面重定向后会被替换
             st.session_state.user_session_id = "temp_id_until_redirect"
             st.stop()  # 停止执行，等待页面重定向
@@ -335,7 +335,7 @@ with st.sidebar:
         window.location.href = newUrl;
         </script>
         """
-        components.html(new_session_script, height=0, width=0, key='new_session')
+        components.html(new_session_script, height=0, width=0)
         st.stop()  # 停止执行，等待页面重定向
 
 # ---------------------------- 主界面 ----------------------------
