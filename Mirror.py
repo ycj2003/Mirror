@@ -1,5 +1,5 @@
 import streamlit as st
-from openai import OpenAI
+#from openai import OpenAI
 import time
 
 # --- 新增的Firebase导入和初始化 ---
