@@ -54,89 +54,60 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- 用户身份管理 ----------------------------
-def get_user_id():
-    """获取唯一的用户身份标识"""
-    # 使用浏览器fingerprint作为用户标识
-    if 'browser_user_id' not in st.session_state:
-        # 生成基于时间和随机数的用户ID
-        st.session_state.browser_user_id = f"browser_{int(time.time())}_{str(uuid4())[:12]}"
-        
-        # 尝试从localStorage获取已存储的用户ID
-        get_user_id_script = f"""
-        <script>
-        var storedUserId = localStorage.getItem('mirror_user_id');
-        if (storedUserId && storedUserId !== 'null') {{
-            // 如果找到已存储的用户ID，通过自定义事件发送给Streamlit
-            window.dispatchEvent(new CustomEvent('userIdFound', {{
-                detail: {{ userId: storedUserId }}
-            }});
-            
-            // 同时尝试通过postMessage发送（兼容性）
-            window.parent.postMessage({{
-                type: 'USER_ID_FOUND',
-                userId: storedUserId
-            }}, '*');
-        }} else {{
-            // 没找到，存储新生成的用户ID
-            localStorage.setItem('mirror_user_id', '{st.session_state.browser_user_id}');
-        }}
-        </script>
-        """
-        components.html(get_user_id_script, height=0)
+# ---------------------------- 用户身份管理（强化版） ----------------------------
+def get_user_fingerprint():
+    """生成浏览器指纹作为用户标识"""
+    # 使用Streamlit的内置会话信息
+    if hasattr(st, 'session_state') and hasattr(st.session_state, '_session_state_id'):
+        # 使用Streamlit内部会话ID作为基础
+        base_id = str(st.session_state._session_state_id)
+    else:
+        # 备用方案：使用时间戳和随机数
+        base_id = f"{int(time.time())}_{str(uuid4())}"
     
-    return st.session_state.browser_user_id
+    # 生成用户指纹
+    import hashlib
+    user_fingerprint = hashlib.md5(base_id.encode()).hexdigest()[:16]
+    
+    if 'stable_user_id' not in st.session_state:
+        st.session_state.stable_user_id = f"usr_{user_fingerprint}"
+    
+    return st.session_state.stable_user_id
 
-# ---------------------------- 会话 ID 管理（添加用户隔离） ----------------------------
+# ---------------------------- 会话 ID 管理（用户隔离强化版） ----------------------------
 def get_current_session_id():
-    """获取当前会话ID - 绑定到特定用户"""
+    """获取当前会话ID - 强化用户隔离"""
     
-    # 首先确保有用户ID
-    user_id = get_user_id()
+    # 获取稳定的用户ID
+    user_fingerprint = get_user_fingerprint()
     
-    # 1. 如果session_state中已有ID，直接使用
+    # 1. 如果session_state中已有ID，验证后使用
     if 'user_session_id' in st.session_state and st.session_state.user_session_id:
-        return st.session_state.user_session_id
+        existing_id = st.session_state.user_session_id
+        # 验证ID是否属于当前用户
+        if existing_id.startswith(user_fingerprint):
+            return existing_id
+        else:
+            # ID不属于当前用户，清除并重新创建
+            del st.session_state.user_session_id
     
-    # 2. 尝试从URL参数获取
+    # 2. 尝试从URL参数获取并验证
     if 'session_id' in st.query_params:
         session_id = st.query_params['session_id']
-        # 验证这个session_id是否属于当前用户
-        if session_id.startswith(user_id[:8]):  # 简单验证
+        # 严格验证：会话ID必须以用户指纹开头
+        if session_id.startswith(user_fingerprint):
             st.session_state.user_session_id = session_id
-            
-            # 后台同步到localStorage
-            sync_script = f"""
-            <script>
-            try {{
-                localStorage.setItem('mirror_session_id', '{session_id}');
-            }} catch(e) {{
-                console.log('localStorage不可用:', e);
-            }}
-            </script>
-            """
-            components.html(sync_script, height=0)
-            
             return session_id
+        else:
+            # URL中的session_id不属于当前用户，清除URL参数
+            st.query_params.clear()
     
     # 3. 创建新的用户专属会话ID
-    new_session_id = f"{user_id}_{int(time.time())}_{str(uuid4())[:6]}"
+    new_session_id = f"{user_fingerprint}_session_{int(time.time())}_{str(uuid4())[:8]}"
     st.session_state.user_session_id = new_session_id
     
     # 更新URL参数
     st.query_params['session_id'] = new_session_id
-    
-    # 同步到localStorage
-    sync_script = f"""
-    <script>
-    try {{
-        localStorage.setItem('mirror_session_id', '{new_session_id}');
-    }} catch(e) {{
-        console.log('localStorage不可用:', e);
-    }}
-    </script>
-    """
-    components.html(sync_script, height=0)
     
     return new_session_id
 
@@ -212,7 +183,7 @@ if "secrets_error" not in st.session_state:
     st.session_state.secrets_error = None
 
 # **关键修复：统一的会话ID管理**
-user_id = get_user_id()
+user_fingerprint = get_user_fingerprint()
 current_session_id = get_current_session_id()
 
 # 初始化或加载对话历史
