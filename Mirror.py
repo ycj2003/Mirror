@@ -54,29 +54,30 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- 用户身份管理（强化版） ----------------------------
+# ---------------------------- 用户身份管理（修复版） ----------------------------
 def get_user_fingerprint():
     """生成浏览器指纹作为用户标识"""
-    # 使用Streamlit的内置会话信息
-    if hasattr(st, 'session_state') and hasattr(st.session_state, '_session_state_id'):
-        # 使用Streamlit内部会话ID作为基础
-        base_id = str(st.session_state._session_state_id)
-    else:
-        # 备用方案：使用时间戳和随机数
-        base_id = f"{int(time.time())}_{str(uuid4())}"
-    
-    # 生成用户指纹
-    import hashlib
-    user_fingerprint = hashlib.md5(base_id.encode()).hexdigest()[:16]
-    
+    # 修复：使用更可靠的方法生成用户标识
     if 'stable_user_id' not in st.session_state:
-        st.session_state.stable_user_id = f"usr_{user_fingerprint}"
+        # 尝试从多个来源生成稳定的用户ID
+        import hashlib
+        
+        # 使用会话状态的哈希作为基础
+        base_components = [
+            str(id(st.session_state)),  # session_state对象的内存地址
+            str(time.time())[:10],      # 时间戳前10位（秒级）
+            str(uuid4())[:8]            # 随机组件
+        ]
+        
+        base_string = "_".join(base_components)
+        user_hash = hashlib.md5(base_string.encode()).hexdigest()[:12]
+        st.session_state.stable_user_id = f"usr_{user_hash}"
     
     return st.session_state.stable_user_id
 
-# ---------------------------- 会话 ID 管理（用户隔离强化版） ----------------------------
+# ---------------------------- 会话 ID 管理（修复版） ----------------------------
 def get_current_session_id():
-    """获取当前会话ID - 强化用户隔离"""
+    """获取当前会话ID - 修复用户隔离逻辑"""
     
     # 获取稳定的用户ID
     user_fingerprint = get_user_fingerprint()
@@ -84,18 +85,15 @@ def get_current_session_id():
     # 1. 如果session_state中已有ID，验证后使用
     if 'user_session_id' in st.session_state and st.session_state.user_session_id:
         existing_id = st.session_state.user_session_id
-        # 验证ID是否属于当前用户
-        if existing_id.startswith(user_fingerprint):
+        # 放宽验证条件：只要ID包含用户指纹即可
+        if user_fingerprint in existing_id:
             return existing_id
-        else:
-            # ID不属于当前用户，清除并重新创建
-            del st.session_state.user_session_id
     
     # 2. 尝试从URL参数获取并验证
     if 'session_id' in st.query_params:
         session_id = st.query_params['session_id']
-        # 严格验证：会话ID必须以用户指纹开头
-        if session_id.startswith(user_fingerprint):
+        # 放宽验证：只要包含用户指纹即可
+        if user_fingerprint in session_id:
             st.session_state.user_session_id = session_id
             return session_id
         else:
@@ -103,7 +101,9 @@ def get_current_session_id():
             st.query_params.clear()
     
     # 3. 创建新的用户专属会话ID
-    new_session_id = f"{user_fingerprint}_session_{int(time.time())}_{str(uuid4())[:8]}"
+    timestamp = int(time.time())
+    random_suffix = str(uuid4())[:8]
+    new_session_id = f"{user_fingerprint}_session_{timestamp}_{random_suffix}"
     st.session_state.user_session_id = new_session_id
     
     # 更新URL参数
@@ -182,7 +182,7 @@ if "db_initialized" not in st.session_state:
 if "secrets_error" not in st.session_state:
     st.session_state.secrets_error = None
 
-# **关键修复：统一的会话ID管理**
+# **修复：统一的会话ID管理**
 user_fingerprint = get_user_fingerprint()
 current_session_id = get_current_session_id()
 
@@ -239,7 +239,8 @@ with st.sidebar:
     st.header("设置")
     
     # 显示当前会话ID（调试用）
-    st.caption(f"当前会话: {current_session_id[:12]}...")
+    st.caption(f"当前会话: {current_session_id[-12:]}...")
+    st.caption(f"用户ID: {user_fingerprint}")
     
     # **会话恢复功能**
     st.subheader("📁 会话管理")
@@ -261,12 +262,12 @@ with st.sidebar:
         """
         components.html(get_last_session_script, height=0)
         
-        # 检查Firebase中是否有其他会话（仅限当前用户）
+        # 修复：检查Firebase中是否有其他会话（仅限当前用户）
         try:
-            # 只查询属于当前用户的会话记录
-            user_prefix = user_id[:12]  # 使用用户ID前缀进行过滤
+            # 修复：使用正确的变量名
+            user_prefix = user_fingerprint  # 使用完整的用户指纹进行过滤
             
-            # 查询所有会话，然后在Python中过滤（因为Firestore的前缀查询限制）
+            # 查询所有会话，然后在Python中过滤
             docs = db.collection("conversations").order_by('last_updated', direction=firestore.Query.DESCENDING).limit(20).stream()
             recent_sessions = []
             
@@ -274,8 +275,8 @@ with st.sidebar:
                 doc_data = doc.to_dict()
                 session_id = doc.id
                 
-                # 严格检查：只显示属于当前用户的会话
-                if (session_id.startswith(user_prefix) and 
+                # 修复：检查会话是否属于当前用户
+                if (user_prefix in session_id and  # 改为包含检查
                     session_id != current_session_id and 
                     doc_data.get('history')):
                     
@@ -309,7 +310,7 @@ with st.sidebar:
                     
                     if st.button(f"📂 恢复会话 ({time_str})", key=f"restore_{i}", help=session_preview):
                         # 再次验证会话属于当前用户
-                        if session['id'].startswith(user_prefix):
+                        if user_prefix in session['id']:  # 改为包含检查
                             # 恢复选中的会话
                             st.session_state.user_session_id = session['id']
                             st.query_params['session_id'] = session['id']
@@ -376,10 +377,12 @@ with st.sidebar:
     3. 如果需要中断AI的当前回应，可以刷新页面
     """)
     
-    # **简化新对话功能**
+    # **修复新对话功能**
     if st.button("🔄 创建新会话"):
         # 生成新的用户专属会话ID
-        new_session_id = f"{user_id}_{int(time.time())}_{str(uuid4())[:6]}"
+        timestamp = int(time.time())
+        random_suffix = str(uuid4())[:6]
+        new_session_id = f"{user_fingerprint}_session_{timestamp}_{random_suffix}"
         
         # 清除Firebase中的旧数据（静默处理）
         if st.session_state.db_initialized and db:
@@ -482,7 +485,10 @@ if prompt := st.chat_input("请输入您的想法..."):
             doc_ref.set({
                 'history': messages_to_save,
                 'last_updated': firestore.SERVER_TIMESTAMP,
-                'session_id': current_session_id  # 添加会话ID用于调试
+                'session_id': current_session_id,  # 添加会话ID用于调试
+                'user_fingerprint': user_fingerprint  # 添加用户指纹用于验证
             })
+            # 添加调试信息
+            st.sidebar.success(f"对话已保存到: {current_session_id[-8:]}...")
         except Exception as e:
-            st.sidebar.warning(f"对话存档失败: {e}")
+            st.sidebar.error(f"对话存档失败: {e}")
