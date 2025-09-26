@@ -1,5 +1,5 @@
 import streamlit as st
-#from openai import OpenAI
+from openai import OpenAI
 import time
 
 # --- 新增的Firebase导入和初始化 ---
@@ -54,42 +54,54 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- 会话 ID 管理 ----------------------------
-def get_or_create_session_id():
-    """获取或创建持久化的会话 ID"""
-    # 尝试从查询参数获取会话 ID
+# ---------------------------- 会话 ID 管理（纯服务端版本） ----------------------------
+def get_current_session_id():
+    """获取当前会话ID - 不依赖JavaScript的版本"""
+    
+    # 1. 如果session_state中已有ID，直接使用
+    if 'user_session_id' in st.session_state and st.session_state.user_session_id:
+        return st.session_state.user_session_id
+    
+    # 2. 尝试从URL参数获取
     if 'session_id' in st.query_params:
         session_id = st.query_params['session_id']
-        # 将获取到的会话 ID 保存到本地存储
-        save_session_id_script = f"""
+        st.session_state.user_session_id = session_id
+        
+        # 可选：后台同步到localStorage（完全非阻塞）
+        sync_script = f"""
         <script>
-        localStorage.setItem('mirror_session_id', '{session_id}');
+        try {{
+            localStorage.setItem('mirror_session_id', '{session_id}');
+        }} catch(e) {{
+            console.log('localStorage不可用:', e);
+        }}
         </script>
         """
-        components.html(save_session_id_script, height=0, width=0)
+        components.html(sync_script, height=0)
+        
         return session_id
     
-    # 尝试从本地存储获取会话 ID
-    get_session_id_script = """
+    # 3. 都没有则创建新ID（不等待任何东西）
+    new_session_id = f"user_{int(time.time())}_{str(uuid4())[:6]}"
+    st.session_state.user_session_id = new_session_id
+    
+    # 更新URL参数
+    st.query_params['session_id'] = new_session_id
+    
+    # 可选：同步到localStorage（完全非阻塞）
+    sync_script = f"""
     <script>
-    var sessionId = localStorage.getItem('mirror_session_id');
-    if (sessionId) {
-        window.history.replaceState(null, null, '?session_id=' + sessionId);
-        window.location.reload();
-    } else {
-        // 创建新的会话 ID
-        var newSessionId = Math.random().toString(36).substring(2) + Date.now().toString(36);
-        localStorage.setItem('mirror_session_id', newSessionId);
-        window.history.replaceState(null, null, '?session_id=' + newSessionId);
-        window.location.reload();
-    }
+    try {{
+        localStorage.setItem('mirror_session_id', '{new_session_id}');
+    }} catch(e) {{
+        console.log('localStorage不可用:', e);
+    }}
     </script>
     """
+    components.html(sync_script, height=0)
     
-    components.html(get_session_id_script, height=0, width=0)
-    # 返回一个临时值，页面重载后会被替换
-    return "temp_session_id_until_reload"
-    
+    return new_session_id
+
 # ---------------------------- 自定义CSS ----------------------------
 st.markdown("""
 <style>
@@ -151,7 +163,7 @@ SYSTEM_PROMPT = BACKGROUND_SETTING + "\n" + TASK_DIRECTIVE
 # ==================== 配置结束 ====================
 
 # ---------------------------- 初始化所有会话状态 ----------------------------
-# 首先，确保所有可能用到的状态变量都有默认值
+# 基础状态初始化
 if "api_key_configured" not in st.session_state:
     st.session_state.api_key_configured = False
 if "client" not in st.session_state:
@@ -160,64 +172,39 @@ if "db_initialized" not in st.session_state:
     st.session_state.db_initialized = False
 if "secrets_error" not in st.session_state:
     st.session_state.secrets_error = None
-# 初始化 user_session_id，如果还没有设置的话
-if 'user_session_id' not in st.session_state:
-    # 先设置为一个临时值，等待JavaScript代码更新它
-    st.session_state.user_session_id = "pending_js_session_id"
-# 然后，尝试从浏览器本地存储或数据库加载历史记录
+
+# **关键修复：统一的会话ID管理**
+current_session_id = get_current_session_id()
+
+# 初始化或加载对话历史
 if "messages" not in st.session_state:
-    # 尝试生成或获取一个用户会话ID
-    if 'user_session_id' not in st.session_state:
-    # 先尝试从URL参数获取
-        if 'session_id' in st.query_params:
-            st.session_state.user_session_id = st.query_params['session_id']
-        else:
-            # 如果没有URL参数，再尝试从本地存储获取（通过JS）
-            # 注意：这里应只获取，如果不为null则设置到URL并重载
-            # 如果本地存储也没有，才生成一个新的
-            try:
-                # 尝试通过JS获取本地存储的session_id
-                get_local_storage_script = """
-                <script>
-                var localSessionId = localStorage.getItem('mirror_session_id');
-                if (localSessionId) {
-                    window.parent.postMessage({
-                        type: 'STREAMLIT_LOCAL_SESSION_ID',
-                        value: localSessionId
-                    }, '*');
-                }
-                </script>
-                """
-                components.html(get_local_storage_script, height=0, width=0)
-                # ... 处理消息，如果收到消息则设置到 st.query_params 并重载
-            except:
-                # 最终兜底方案：生成全新ID
-                new_id = str(uuid4())
-                st.session_state.user_session_id = new_id
-                st.query_params["session_id"] = new_id
-    # 尝试从数据库加载（只有在前面的基本状态初始化完成后才进行这步）
     loaded_history = False
-    if st.session_state.db_initialized:  # 现在这个状态已经初始化了，可以安全地访问
+    
+    # 尝试从Firebase加载历史对话
+    if st.session_state.db_initialized and db:
         try:
-            doc_ref = db.collection("conversations").document(st.session_state.user_session_id)
+            doc_ref = db.collection("conversations").document(current_session_id)
             doc = doc_ref.get()
             if doc.exists:
                 data = doc.to_dict()
-                st.session_state.messages = [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    *data.get('history', [])
-                ]
-                st.sidebar.success("已从存档恢复对话历史！")
-                loaded_history = True
+                history = data.get('history', [])
+                if history:  # 只有当历史记录不为空时才加载
+                    st.session_state.messages = [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        *history
+                    ]
+                    loaded_history = True
+                    st.sidebar.success("已从存档恢复对话历史！")
         except Exception as e:
             st.sidebar.warning(f"读取存档失败: {e}")
-
+    
+    # 如果没有加载到历史记录，创建新对话
     if not loaded_history:
         st.session_state.messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "assistant", "content": OPENING_TEMPLATE}
         ]
-    
+
 # ------------------------------API密钥设置--------------------------------
 # 确保每次运行时都检查 Secrets
 if 'DEEPSEEK_API_KEY' in st.secrets and not st.session_state.api_key_configured:
@@ -241,7 +228,97 @@ if 'DEEPSEEK_API_KEY' in st.secrets and not st.session_state.api_key_configured:
 with st.sidebar:
     st.header("设置")
     
-    # 显示 Secrets 错误信息（如果有）
+    # 显示当前会话ID（调试用）
+    st.caption(f"当前会话: {current_session_id[:12]}...")
+    
+    # **会话恢复功能**
+    st.subheader("📁 会话管理")
+    
+    # 检查是否有可恢复的会话
+    if st.session_state.get('db_initialized') and db:
+        # 尝试从localStorage获取上一个会话ID
+        get_last_session_script = """
+        <script>
+        var lastSessionId = localStorage.getItem('mirror_session_id');
+        if (lastSessionId && lastSessionId !== window.location.search.split('session_id=')[1]) {
+            // 如果localStorage中的ID与当前URL中的不同，说明可能需要恢复
+            window.parent.postMessage({
+                type: 'LAST_SESSION_ID',
+                sessionId: lastSessionId
+            }, '*');
+        }
+        </script>
+        """
+        components.html(get_last_session_script, height=0)
+        
+        # 检查Firebase中是否有其他会话
+        try:
+            # 查询最近的几个会话
+            docs = db.collection("conversations").order_by('last_updated', direction=firestore.Query.DESCENDING).limit(5).stream()
+            recent_sessions = []
+            
+            for doc in docs:
+                doc_data = doc.to_dict()
+                session_id = doc.id
+                if session_id != current_session_id and doc_data.get('history'):
+                    # 获取最后一条消息的时间和内容预览
+                    last_updated = doc_data.get('last_updated')
+                    history = doc_data.get('history', [])
+                    if history:
+                        last_message = history[-1].get('content', '')[:50] + '...' if len(history[-1].get('content', '')) > 50 else history[-1].get('content', '')
+                        recent_sessions.append({
+                            'id': session_id,
+                            'preview': last_message,
+                            'time': last_updated,
+                            'message_count': len(history)
+                        })
+            
+            if recent_sessions:
+                st.write("🔄 **发现最近的对话记录**")
+                
+                # 显示可恢复的会话列表
+                for i, session in enumerate(recent_sessions[:3]):  # 只显示最近3个
+                    time_str = "未知时间"
+                    if session['time']:
+                        try:
+                            time_str = session['time'].strftime("%m-%d %H:%M")
+                        except:
+                            time_str = "最近"
+                    
+                    session_preview = f"会话 {session['id'][:8]}... ({session['message_count']}条消息)"
+                    if session['preview']:
+                        session_preview += f"\n最后消息: {session['preview']}"
+                    
+                    if st.button(f"📂 恢复会话 ({time_str})", key=f"restore_{i}", help=session_preview):
+                        # 恢复选中的会话
+                        st.session_state.user_session_id = session['id']
+                        st.query_params['session_id'] = session['id']
+                        
+                        # 清除当前消息
+                        if 'messages' in st.session_state:
+                            del st.session_state['messages']
+                        
+                        # 更新localStorage
+                        update_storage_script = f"""
+                        <script>
+                        localStorage.setItem('mirror_session_id', '{session['id']}');
+                        window.location.reload();
+                        </script>
+                        """
+                        components.html(update_storage_script, height=0)
+                        
+                        st.success(f"正在恢复会话 {session['id'][:8]}...")
+                        time.sleep(0.5)
+                        st.rerun()
+                
+                st.caption("💡 提示：关闭网页后，下次访问时可以通过这里恢复之前的对话")
+            else:
+                st.caption("暂无可恢复的对话记录")
+                
+        except Exception as e:
+            st.caption(f"检查历史会话时出错: {e}")
+    
+    st.divider()
     if hasattr(st.session_state, 'secrets_error') and st.session_state.secrets_error:
         st.error(f"预配置API密钥错误: {st.session_state.secrets_error}")
     
@@ -276,6 +353,40 @@ with st.sidebar:
     2. 开始与认知镜子对话
     3. 如果需要中断AI的当前回应，可以刷新页面
     """)
+    
+    # **简化新对话功能**
+    if st.button("🔄 创建新会话"):
+        # 生成新的会话ID
+        new_session_id = f"user_{int(time.time())}_{str(uuid4())[:6]}"
+        
+        # 清除Firebase中的旧数据（静默处理）
+        if st.session_state.db_initialized and db:
+            try:
+                doc_ref = db.collection("conversations").document(current_session_id)
+                doc_ref.delete()
+            except:
+                pass  # 静默处理错误
+        
+        # 清除本地状态
+        if 'messages' in st.session_state:
+            del st.session_state['messages']
+        
+        # 更新会话ID
+        st.session_state.user_session_id = new_session_id
+        st.query_params['session_id'] = new_session_id
+        
+        # 更新localStorage并刷新页面
+        refresh_script = f"""
+        <script>
+        localStorage.setItem('mirror_session_id', '{new_session_id}');
+        window.location.reload();
+        </script>
+        """
+        components.html(refresh_script, height=0)
+        
+        st.success("正在创建新会话...")
+        time.sleep(1)
+        st.rerun()
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
@@ -311,7 +422,6 @@ if prompt := st.chat_input("请输入您的想法..."):
         
         try:
             # 调用API（使用流式输出）
-            # 注意：这里发送的是所有消息，包括系统提示词
             api_messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 *st.session_state.messages[1:]  # 跳过第一条系统消息，保留对话历史
@@ -341,16 +451,16 @@ if prompt := st.chat_input("请输入您的想法..."):
     # 添加AI回复到历史
     st.session_state.messages.append({"role": "assistant", "content": full_response})
 
-    # --- 新增：自动保存对话历史到数据库 ---
-    if st.session_state.get('db_initialized'):
+    # **修复：使用正确的会话ID保存数据**
+    if st.session_state.get('db_initialized') and db:
         try:
             # 只保存实际对话消息，跳过系统提示词
             messages_to_save = st.session_state.messages[1:]
-            doc_ref = db.collection("conversations").document(st.session_state.user_session_id)
+            doc_ref = db.collection("conversations").document(current_session_id)
             doc_ref.set({
                 'history': messages_to_save,
-                'last_updated': firestore.SERVER_TIMESTAMP # 使用服务器时间
+                'last_updated': firestore.SERVER_TIMESTAMP,
+                'session_id': current_session_id  # 添加会话ID用于调试
             })
-            # 可以安静地成功，不需要提示用户
         except Exception as e:
-            st.sidebar.warning("对话存档失败，但本次对话仍可继续。")
+            st.sidebar.warning(f"对话存档失败: {e}")
