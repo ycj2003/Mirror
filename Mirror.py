@@ -9,8 +9,6 @@ import json
 from uuid import uuid4
 import hashlib
 
-import streamlit.components.v1 as components
-
 # 初始化 Firebase（只会运行一次）
 if not firebase_admin._apps:
     if 'FIREBASE_PRIVATE_KEY' in st.secrets:
@@ -52,145 +50,118 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- 稳定的用户身份管理（修复版） ----------------------------
+# ---------------------------- 用户身份管理（改用URL持久化方案） ----------------------------
 def get_user_id():
-    """获取稳定的用户ID - 优先使用URL参数"""
-    # 1. 优先从URL参数获取（localStorage会设置到这里）
-    if 'user_id' in st.query_params:
-        user_id = st.query_params['user_id']
-        if user_id and user_id.startswith('user_'):
-            st.session_state.user_id = user_id
+    """
+    获取用户ID - 改用URL作为唯一真实来源
+    用户首次访问时会被分配一个ID，并要求他们收藏/保存这个URL
+    """
+    # 从URL参数获取
+    if 'uid' in st.query_params:
+        user_id = st.query_params['uid']
+        if user_id and len(user_id) > 10:  # 基本验证
+            if 'user_id' not in st.session_state or st.session_state.user_id != user_id:
+                st.session_state.user_id = user_id
             return user_id
     
-    # 2. 从session_state获取
-    if 'user_id' in st.session_state and st.session_state.user_id:
-        # 确保URL参数也有
-        if 'user_id' not in st.query_params:
-            st.query_params['user_id'] = st.session_state.user_id
-        return st.session_state.user_id
+    # 从session_state获取（刷新时用）
+    if 'user_id' in st.session_state:
+        user_id = st.session_state.user_id
+        # 确保URL也有
+        if 'uid' not in st.query_params:
+            st.query_params['uid'] = user_id
+        return user_id
     
-    # 3. 创建新用户ID
-    new_user_id = f"user_{int(time.time())}_{str(uuid4())[:9]}"
+    # 生成新用户ID
+    timestamp = int(time.time())
+    random_part = str(uuid4()).replace('-', '')[:12]
+    new_user_id = f"{timestamp}{random_part}"
+    
     st.session_state.user_id = new_user_id
-    st.query_params['user_id'] = new_user_id
+    st.query_params['uid'] = new_user_id
     
     return new_user_id
 
-def inject_user_id_script():
-    """注入JavaScript脚本来管理localStorage中的用户ID"""
-    user_id_script = """
-    <script>
-    (function() {
-        // 从URL获取user_id参数
-        const urlParams = new URLSearchParams(window.location.search);
-        let userId = urlParams.get('user_id');
-        
-        // 从localStorage获取存储的user_id
-        let storedUserId = localStorage.getItem('mirror_user_id');
-        
-        if (storedUserId && !userId) {
-            // 如果localStorage有ID但URL没有，将localStorage的ID设置到URL
-            urlParams.set('user_id', storedUserId);
-            const newUrl = window.location.pathname + '?' + urlParams.toString();
-            window.history.replaceState({}, '', newUrl);
-            // 刷新页面以让Streamlit获取到user_id
-            window.location.href = newUrl;
-        } else if (userId && userId !== storedUserId) {
-            // 如果URL有ID，同步到localStorage
-            localStorage.setItem('mirror_user_id', userId);
-        } else if (!userId && !storedUserId) {
-            // 都没有，等待Streamlit生成
-            // 不做任何操作
-        }
-    })();
-    </script>
-    """
-    components.html(user_id_script, height=0)
-
-# ---------------------------- 会话管理 ----------------------------
 def get_session_id():
     """获取或创建会话ID"""
     user_id = get_user_id()
     
-    # 1. 优先使用URL参数中的会话ID
-    if 'session_id' in st.query_params:
-        session_id = st.query_params['session_id']
-        # 验证会话ID格式
-        if 'user_' in session_id and session_id.count('_') >= 2:
-            st.session_state.current_session_id = session_id
+    # 1. 从URL参数获取
+    if 'sid' in st.query_params:
+        session_id = st.query_params['sid']
+        if session_id and len(session_id) > 10:
+            if 'current_session_id' not in st.session_state or st.session_state.current_session_id != session_id:
+                st.session_state.current_session_id = session_id
             return session_id
     
-    # 2. 检查session_state中是否已有会话ID
-    if hasattr(st.session_state, 'current_session_id') and st.session_state.current_session_id:
-        # 确保URL参数也有
-        if 'session_id' not in st.query_params:
-            st.query_params['session_id'] = st.session_state.current_session_id
-        return st.session_state.current_session_id
+    # 2. 从session_state获取
+    if 'current_session_id' in st.session_state:
+        session_id = st.session_state.current_session_id
+        if 'sid' not in st.query_params:
+            st.query_params['sid'] = session_id
+        return session_id
     
-    # 3. 尝试从Firebase加载该用户最近的会话
-    if st.session_state.get('db_initialized') and db:
-        try:
-            # 提取用户ID核心部分
-            user_core = user_id.split('_')[1] if '_' in user_id and len(user_id.split('_')) > 1 else user_id
-            
-            # 查询最近1个会话
-            docs = db.collection("conversations").order_by('last_updated', direction=firestore.Query.DESCENDING).limit(5).stream()
-            
-            for doc in docs:
-                doc_data = doc.to_dict()
-                stored_user_id = doc_data.get('user_id', '')
-                
-                # 检查是否属于当前用户
-                if user_id == stored_user_id or (user_core and user_core in stored_user_id):
-                    # 找到了用户最近的会话
-                    latest_session_id = doc.id
-                    st.session_state.current_session_id = latest_session_id
-                    st.query_params['session_id'] = latest_session_id
-                    return latest_session_id
-        except Exception as e:
-            # 静默处理错误，继续创建新会话
-            pass
+    # 3. 尝试加载该用户的最近会话
+    latest_session = load_latest_session(user_id)
+    if latest_session:
+        st.session_state.current_session_id = latest_session
+        st.query_params['sid'] = latest_session
+        return latest_session
     
-    # 4. 创建新会话ID
+    # 4. 创建新会话
     timestamp = int(time.time())
-    random_part = str(uuid4())[:6]
+    random_part = str(uuid4()).replace('-', '')[:8]
     new_session_id = f"{user_id}_{timestamp}_{random_part}"
     
     st.session_state.current_session_id = new_session_id
-    st.query_params['session_id'] = new_session_id
+    st.query_params['sid'] = new_session_id
     
     return new_session_id
 
+def load_latest_session(user_id):
+    """加载用户最近的会话ID"""
+    if not st.session_state.get('db_initialized') or not db:
+        return None
+    
+    try:
+        # 查询该用户的最近会话
+        docs = db.collection("conversations").where('user_id', '==', user_id).order_by('last_updated', direction=firestore.Query.DESCENDING).limit(1).stream()
+        
+        for doc in docs:
+            doc_data = doc.to_dict()
+            if doc_data.get('messages'):
+                return doc.id
+        
+        return None
+    except Exception as e:
+        # Firestore可能还没有索引，静默处理
+        return None
+
 # ---------------------------- Firebase操作函数 ----------------------------
-def save_conversation(session_id, messages):
+def save_conversation(session_id, messages, user_id):
     """保存对话到Firebase"""
     if not st.session_state.get('db_initialized') or not db:
         return False, "Firebase未初始化"
     
     try:
-        # 只保存用户和助手的消息
         messages_to_save = [msg for msg in messages if msg.get('role') in ['user', 'assistant']]
         
         if not messages_to_save:
             return False, "没有需要保存的消息"
         
-        user_id = get_user_id()
         doc_ref = db.collection("conversations").document(session_id)
-        
-        # 使用merge选项避免覆盖其他字段
         doc_ref.set({
             'messages': messages_to_save,
             'last_updated': firestore.SERVER_TIMESTAMP,
             'user_id': user_id,
-            'message_count': len(messages_to_save),
-            'session_id': session_id  # 便于调试
+            'message_count': len(messages_to_save)
         }, merge=True)
         
         return True, "保存成功"
     except Exception as e:
         return False, f"保存失败: {str(e)}"
 
-def load_conversation(session_id):
+def load_conversation(session_id, user_id):
     """从Firebase加载对话"""
     if not st.session_state.get('db_initialized') or not db:
         return None, "Firebase未初始化"
@@ -206,89 +177,56 @@ def load_conversation(session_id):
             if not messages:
                 return None, "会话记录为空"
             
-            # 验证消息是否属于当前用户
+            # 验证会话属于当前用户
             stored_user_id = data.get('user_id')
-            current_user_id = get_user_id()
+            if stored_user_id != user_id:
+                return None, "会话不属于当前用户"
             
-            # 放宽验证条件：只要user_id包含关键部分即可
-            if stored_user_id and ('user_' in stored_user_id):
-                # 提取两个ID的核心部分进行比对
-                stored_core = stored_user_id.split('_')[1] if '_' in stored_user_id else stored_user_id
-                current_core = current_user_id.split('_')[1] if '_' in current_user_id else current_user_id
-                
-                if stored_core == current_core or stored_user_id == current_user_id:
-                    return messages, "加载成功"
-            
-            return None, "用户验证失败"
+            return messages, "加载成功"
         else:
             return None, "未找到会话记录"
     except Exception as e:
         return None, f"加载失败: {str(e)}"
 
-def get_user_sessions(include_current=False):
+def get_user_sessions(user_id, current_session_id):
     """获取当前用户的会话列表"""
     if not st.session_state.get('db_initialized') or not db:
         return []
     
     try:
-        user_id = get_user_id()
-        
-        # 获取当前会话ID（避免递归）
-        current_session = None
-        if hasattr(st.session_state, 'current_session_id'):
-            current_session = st.session_state.current_session_id
-        elif 'session_id' in st.query_params:
-            current_session = st.query_params['session_id']
-        
-        # 提取用户ID的核心部分用于匹配
-        user_core = user_id.split('_')[1] if '_' in user_id else user_id
-        
-        # 查询最近的会话
-        docs = db.collection("conversations").order_by('last_updated', direction=firestore.Query.DESCENDING).limit(20).stream()
+        # 查询该用户的所有会话
+        docs = db.collection("conversations").where('user_id', '==', user_id).order_by('last_updated', direction=firestore.Query.DESCENDING).limit(10).stream()
         
         user_sessions = []
         for doc in docs:
             doc_data = doc.to_dict()
             session_id = doc.id
-            stored_user_id = doc_data.get('user_id', '')
             
-            # 提取存储的用户ID核心部分
-            stored_core = stored_user_id.split('_')[1] if '_' in stored_user_id else ''
+            # 跳过当前会话
+            if session_id == current_session_id:
+                continue
             
-            # 检查是否属于当前用户
-            if (stored_core == user_core or stored_user_id == user_id) and doc_data.get('messages'):
-                # 如果不包含当前会话，则跳过
-                if not include_current and current_session and session_id == current_session:
-                    continue
-                
-                messages = doc_data.get('messages', [])
-                last_message = ""
-                if messages:
-                    last_message = messages[-1].get('content', '')[:50]
-                    if len(messages[-1].get('content', '')) > 50:
-                        last_message += "..."
-                
-                user_sessions.append({
-                    'id': session_id,
-                    'preview': last_message,
-                    'time': doc_data.get('last_updated'),
-                    'count': len(messages)
-                })
+            messages = doc_data.get('messages', [])
+            if not messages:
+                continue
+            
+            last_message = ""
+            if messages:
+                last_message = messages[-1].get('content', '')[:50]
+                if len(messages[-1].get('content', '')) > 50:
+                    last_message += "..."
+            
+            user_sessions.append({
+                'id': session_id,
+                'preview': last_message,
+                'time': doc_data.get('last_updated'),
+                'count': len(messages)
+            })
         
         return user_sessions
     except Exception as e:
-        st.sidebar.error(f"获取会话列表失败: {e}")
+        # Firestore索引可能还没建立
         return []
-
-def get_latest_user_session():
-    """获取用户最近的会话ID"""
-    try:
-        sessions = get_user_sessions(include_current=True)
-        if sessions:
-            return sessions[0]['id']
-        return None
-    except:
-        return None
 
 # ---------------------------- 自定义CSS ----------------------------
 st.markdown("""
@@ -312,6 +250,14 @@ st.markdown("""
         color: #6b6b6b;
         font-style: italic;
         margin-bottom: 2rem;
+    }
+    .url-notice {
+        background-color: #fff3cd;
+        border: 1px solid #ffc107;
+        border-radius: 5px;
+        padding: 10px;
+        margin: 10px 0;
+        font-size: 14px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -342,9 +288,6 @@ OPENING_TEMPLATE = "你好，我是一面镜子。在这里思考，亦看见你
 SYSTEM_PROMPT = BACKGROUND_SETTING + "\n" + TASK_DIRECTIVE
 
 # ---------------------------- 初始化会话状态 ----------------------------
-# 注入用户ID管理脚本
-inject_user_id_script()
-
 if "api_key_configured" not in st.session_state:
     st.session_state.api_key_configured = False
 if "client" not in st.session_state:
@@ -356,25 +299,33 @@ if "db_initialized" not in st.session_state:
 current_user_id = get_user_id()
 current_session_id = get_session_id()
 
+# 如果是新用户（URL刚生成），显示提示
+if 'uid' in st.query_params and 'shown_url_notice' not in st.session_state:
+    st.session_state.shown_url_notice = True
+    with st.sidebar:
+        st.markdown("""
+        <div class="url-notice">
+        <b>📌 重要提示</b><br>
+        为了能恢复您的对话记录，请将当前网址<b>加入书签</b>或<b>保存链接</b>。<br>
+        您的对话已自动绑定到此链接。
+        </div>
+        """, unsafe_allow_html=True)
+
 # 初始化或加载对话历史
 if "messages" not in st.session_state:
-    # 尝试从Firebase加载对话历史
-    loaded_messages, load_message = load_conversation(current_session_id)
+    loaded_messages, load_message = load_conversation(current_session_id, current_user_id)
     
     if loaded_messages:
-        # 成功加载历史记录
         st.session_state.messages = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ] + loaded_messages
         
-        # 判断是否是自动恢复的会话
-        is_auto_restored = 'session_id' not in st.query_params or len(loaded_messages) > 1
-        if is_auto_restored:
-            st.sidebar.success(f"✅ 已自动恢复对话 (共{len(loaded_messages)}条)")
-        else:
+        # 检查是否是通过sid恢复的
+        if 'sid' in st.query_params:
             st.sidebar.success(f"✅ 已加载对话 (共{len(loaded_messages)}条)")
+        else:
+            st.sidebar.success(f"✅ 已自动恢复最近对话 (共{len(loaded_messages)}条)")
     else:
-        # 创建新对话
         st.session_state.messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "assistant", "content": OPENING_TEMPLATE}
@@ -401,8 +352,8 @@ if 'DEEPSEEK_API_KEY' in st.secrets and not st.session_state.api_key_configured:
 with st.sidebar:
     st.header("🛠️ 设置")
     
-    # 显示调试信息
-    st.caption(f"👤 用户: {current_user_id[-8:]}...")
+    # 显示用户ID（简短版）
+    st.caption(f"👤 ID: {current_user_id[:8]}...")
     st.caption(f"💬 会话: {current_session_id[-12:]}...")
     
     # API密钥配置
@@ -434,9 +385,9 @@ with st.sidebar:
     st.subheader("📁 会话管理")
     
     # 显示历史会话
-    user_sessions = get_user_sessions(include_current=False)
+    user_sessions = get_user_sessions(current_user_id, current_session_id)
     if user_sessions:
-        st.write("**其他历史对话:**")
+        st.write("**历史对话:**")
         for i, session in enumerate(user_sessions[:5]):
             time_str = "未知"
             if session['time']:
@@ -448,47 +399,41 @@ with st.sidebar:
             button_label = f"📂 {time_str} ({session['count']}条)"
             if st.button(button_label, key=f"load_session_{i}"):
                 # 切换到选中的会话
-                st.session_state.current_session_id = session['id']
-                st.query_params['session_id'] = session['id']
+                st.query_params['sid'] = session['id']
                 
-                # 清除当前消息以强制重新加载
+                # 清除消息以强制重新加载
                 if 'messages' in st.session_state:
                     del st.session_state['messages']
                 
-                st.success(f"正在加载会话...")
                 st.rerun()
             
-            # 显示预览
             if session['preview']:
                 st.caption(f"💭 {session['preview']}")
     else:
-        st.caption("暂无其他历史对话")
+        st.caption("暂无历史对话")
     
     # 新建会话按钮
     if st.button("🆕 新建会话"):
-        # 生成新会话ID
-        new_session_id = f"{current_user_id}_{int(time.time())}_{str(uuid4())[:6]}"
+        timestamp = int(time.time())
+        random_part = str(uuid4()).replace('-', '')[:8]
+        new_session_id = f"{current_user_id}_{timestamp}_{random_part}"
         
-        # 更新会话状态
-        st.session_state.current_session_id = new_session_id
-        st.query_params['session_id'] = new_session_id
+        st.query_params['sid'] = new_session_id
         
-        # 清除消息历史
         if 'messages' in st.session_state:
             del st.session_state['messages']
         
-        st.success("正在创建新会话...")
         st.rerun()
     
     st.divider()
-    st.caption("💡 对话会自动保存到云端")
-    st.caption("🔐 您的数据安全存储，仅您可见")
+    st.caption("💡 对话自动保存")
+    st.caption("🔖 保存网址以恢复对话")
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
 st.markdown('<p class="subtitle">明镜止水。</p>', unsafe_allow_html=True)
 
-# 显示聊天记录（跳过系统消息）
+# 显示聊天记录
 for message in st.session_state.messages[1:]:
     avatar = "🪞" if message["role"] == "assistant" else "👤"
     with st.chat_message(message["role"], avatar=avatar):
@@ -517,7 +462,6 @@ if prompt := st.chat_input("请输入您的想法..."):
         full_response = ""
         
         try:
-            # API调用
             api_messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 *st.session_state.messages[1:]
@@ -530,7 +474,6 @@ if prompt := st.chat_input("请输入您的想法..."):
                 temperature=0.1
             )
             
-            # 流式输出
             for chunk in stream:
                 if chunk.choices[0].delta.content is not None:
                     full_response += chunk.choices[0].delta.content
@@ -547,8 +490,8 @@ if prompt := st.chat_input("请输入您的想法..."):
     st.session_state.messages.append({"role": "assistant", "content": full_response})
     
     # 保存对话到Firebase
-    success, message = save_conversation(current_session_id, st.session_state.messages)
+    success, message = save_conversation(current_session_id, st.session_state.messages, current_user_id)
     if success:
-        st.sidebar.success("💾 对话已自动保存")
+        st.sidebar.success("💾 已自动保存")
     else:
-        st.sidebar.error(f"💾 保存失败: {message}")
+        st.sidebar.error(f"💾 {message}")
