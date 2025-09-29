@@ -124,15 +124,7 @@ def get_session_id():
     if hasattr(st.session_state, 'current_session_id') and st.session_state.current_session_id:
         return st.session_state.current_session_id
     
-    # 3. 如果是新访问，尝试加载最近的会话
-    if 'session_id' not in st.query_params:
-        latest_session = get_latest_user_session()
-        if latest_session:
-            st.session_state.current_session_id = latest_session
-            st.query_params['session_id'] = latest_session
-            return latest_session
-    
-    # 4. 创建新会话ID
+    # 3. 创建新会话ID（移除了递归调用）
     timestamp = int(time.time())
     random_part = str(uuid4())[:6]
     new_session_id = f"{user_id}_{timestamp}_{random_part}"
@@ -213,7 +205,13 @@ def get_user_sessions(include_current=False):
     
     try:
         user_id = get_user_id()
-        current_session = get_session_id()
+        
+        # 获取当前会话ID（避免递归）
+        current_session = None
+        if hasattr(st.session_state, 'current_session_id'):
+            current_session = st.session_state.current_session_id
+        elif 'session_id' in st.query_params:
+            current_session = st.query_params['session_id']
         
         # 提取用户ID的核心部分用于匹配
         user_core = user_id.split('_')[1] if '_' in user_id else user_id
@@ -233,7 +231,7 @@ def get_user_sessions(include_current=False):
             # 检查是否属于当前用户
             if (stored_core == user_core or stored_user_id == user_id) and doc_data.get('messages'):
                 # 如果不包含当前会话，则跳过
-                if not include_current and session_id == current_session:
+                if not include_current and current_session and session_id == current_session:
                     continue
                 
                 messages = doc_data.get('messages', [])
