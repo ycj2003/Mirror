@@ -13,15 +13,13 @@ import streamlit.components.v1 as components
 
 # 初始化 Firebase（只会运行一次）
 if not firebase_admin._apps:
-    # 检查 Secrets 中是否有私钥
     if 'FIREBASE_PRIVATE_KEY' in st.secrets:
         try:
-            # 从 Streamlit Secrets 中构建私钥字典
             private_key_dict = {
                 "type": st.secrets["FIREBASE_TYPE"],
                 "project_id": st.secrets["FIREBASE_PROJECT_ID"],
                 "private_key_id": st.secrets["FIREBASE_PRIVATE_KEY_ID"],
-                "private_key": st.secrets["FIREBASE_PRIVATE_KEY"].replace('\\n', '\n'), # 关键：处理换行符
+                "private_key": st.secrets["FIREBASE_PRIVATE_KEY"].replace('\\n', '\n'),
                 "client_email": st.secrets["FIREBASE_CLIENT_EMAIL"],
                 "client_id": st.secrets["FIREBASE_CLIENT_ID"],
                 "auth_uri": st.secrets["FIREBASE_AUTH_URI"],
@@ -29,7 +27,6 @@ if not firebase_admin._apps:
                 "auth_provider_x509_cert_url": st.secrets["FIREBASE_AUTH_PROVIDER_CERT_URL"],
                 "client_x509_cert_url": st.secrets["FIREBASE_CLIENT_CERT_URL"]
             }
-            # 使用字典初始化认证
             cred = credentials.Certificate(private_key_dict)
             firebase_admin.initialize_app(cred)
             st.session_state.db_initialized = True
@@ -55,25 +52,62 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- 简化的用户身份管理 ----------------------------
-def get_user_id():
-    """生成稳定的用户ID"""
-    if 'user_id' not in st.session_state:
-        # 使用简单但稳定的方法生成用户ID
-        browser_info = {
-            'timestamp': str(int(time.time() / 3600)),  # 按小时分组，提供一定稳定性
-            'session_hash': str(abs(hash(str(st.session_state))))[:8]
+# ---------------------------- 稳定的用户身份管理（修复版） ----------------------------
+def init_user_id():
+    """从浏览器localStorage初始化或获取用户ID"""
+    # JavaScript代码：从localStorage获取或创建用户ID
+    get_user_id_script = """
+    <script>
+    (function() {
+        let userId = localStorage.getItem('mirror_user_id');
+        if (!userId) {
+            // 生成新的用户ID
+            userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            localStorage.setItem('mirror_user_id', userId);
         }
         
-        user_hash = hashlib.md5(
-            f"{browser_info['timestamp']}_{browser_info['session_hash']}".encode()
-        ).hexdigest()[:12]
+        // 将用户ID发送给Streamlit
+        window.parent.postMessage({
+            type: 'MIRROR_USER_ID',
+            userId: userId
+        }, '*');
         
-        st.session_state.user_id = f"user_{user_hash}"
-    
-    return st.session_state.user_id
+        // 同时设置到URL参数中作为备份
+        const urlParams = new URLSearchParams(window.location.search);
+        if (!urlParams.has('user_id')) {
+            urlParams.set('user_id', userId);
+            const newUrl = window.location.pathname + '?' + urlParams.toString();
+            window.history.replaceState({}, '', newUrl);
+        }
+    })();
+    </script>
+    """
+    components.html(get_user_id_script, height=0)
 
-# ---------------------------- 简化的会话管理 ----------------------------
+def get_user_id():
+    """获取稳定的用户ID"""
+    # 优先从session_state获取
+    if 'user_id' in st.session_state and st.session_state.user_id:
+        return st.session_state.user_id
+    
+    # 从URL参数获取（localStorage的备份）
+    if 'user_id' in st.query_params:
+        user_id = st.query_params['user_id']
+        if user_id.startswith('user_'):
+            st.session_state.user_id = user_id
+            return user_id
+    
+    # 如果都没有，生成一个临时ID（等待JavaScript返回真实ID）
+    if 'temp_user_id' not in st.session_state:
+        temp_id = f"user_{int(time.time())}_{str(uuid4())[:8]}"
+        st.session_state.temp_user_id = temp_id
+        # 设置到URL参数中
+        st.query_params['user_id'] = temp_id
+        st.session_state.user_id = temp_id
+    
+    return st.session_state.temp_user_id
+
+# ---------------------------- 会话管理 ----------------------------
 def get_session_id():
     """获取或创建会话ID"""
     user_id = get_user_id()
@@ -81,17 +115,24 @@ def get_session_id():
     # 1. 优先使用URL参数中的会话ID
     if 'session_id' in st.query_params:
         session_id = st.query_params['session_id']
-        # 简单验证：会话ID应该包含用户标识
-        if user_id[:8] in session_id:  # 使用用户ID的前8位进行验证
+        # 验证会话ID格式
+        if 'user_' in session_id and '_' in session_id:
             st.session_state.current_session_id = session_id
             return session_id
     
     # 2. 检查session_state中是否已有会话ID
     if hasattr(st.session_state, 'current_session_id') and st.session_state.current_session_id:
-        if user_id[:8] in st.session_state.current_session_id:
-            return st.session_state.current_session_id
+        return st.session_state.current_session_id
     
-    # 3. 创建新会话ID
+    # 3. 如果是新访问，尝试加载最近的会话
+    if 'session_id' not in st.query_params:
+        latest_session = get_latest_user_session()
+        if latest_session:
+            st.session_state.current_session_id = latest_session
+            st.query_params['session_id'] = latest_session
+            return latest_session
+    
+    # 4. 创建新会话ID
     timestamp = int(time.time())
     random_part = str(uuid4())[:6]
     new_session_id = f"{user_id}_{timestamp}_{random_part}"
@@ -108,16 +149,24 @@ def save_conversation(session_id, messages):
         return False, "Firebase未初始化"
     
     try:
-        # 只保存用户和助手的消息，跳过系统消息
+        # 只保存用户和助手的消息
         messages_to_save = [msg for msg in messages if msg.get('role') in ['user', 'assistant']]
         
+        if not messages_to_save:
+            return False, "没有需要保存的消息"
+        
+        user_id = get_user_id()
         doc_ref = db.collection("conversations").document(session_id)
+        
+        # 使用merge选项避免覆盖其他字段
         doc_ref.set({
             'messages': messages_to_save,
             'last_updated': firestore.SERVER_TIMESTAMP,
-            'user_id': get_user_id(),
-            'message_count': len(messages_to_save)
-        })
+            'user_id': user_id,
+            'message_count': len(messages_to_save),
+            'session_id': session_id  # 便于调试
+        }, merge=True)
+        
         return True, "保存成功"
     except Exception as e:
         return False, f"保存失败: {str(e)}"
@@ -135,20 +184,29 @@ def load_conversation(session_id):
             data = doc.to_dict()
             messages = data.get('messages', [])
             
+            if not messages:
+                return None, "会话记录为空"
+            
             # 验证消息是否属于当前用户
             stored_user_id = data.get('user_id')
             current_user_id = get_user_id()
             
-            if stored_user_id and current_user_id[:8] in stored_user_id:
-                return messages, "加载成功"
-            else:
-                return None, "用户验证失败"
+            # 放宽验证条件：只要user_id包含关键部分即可
+            if stored_user_id and ('user_' in stored_user_id):
+                # 提取两个ID的核心部分进行比对
+                stored_core = stored_user_id.split('_')[1] if '_' in stored_user_id else stored_user_id
+                current_core = current_user_id.split('_')[1] if '_' in current_user_id else current_user_id
+                
+                if stored_core == current_core or stored_user_id == current_user_id:
+                    return messages, "加载成功"
+            
+            return None, "用户验证失败"
         else:
             return None, "未找到会话记录"
     except Exception as e:
         return None, f"加载失败: {str(e)}"
 
-def get_user_sessions():
+def get_user_sessions(include_current=False):
     """获取当前用户的会话列表"""
     if not st.session_state.get('db_initialized') or not db:
         return []
@@ -157,8 +215,11 @@ def get_user_sessions():
         user_id = get_user_id()
         current_session = get_session_id()
         
+        # 提取用户ID的核心部分用于匹配
+        user_core = user_id.split('_')[1] if '_' in user_id else user_id
+        
         # 查询最近的会话
-        docs = db.collection("conversations").order_by('last_updated', direction=firestore.Query.DESCENDING).limit(10).stream()
+        docs = db.collection("conversations").order_by('last_updated', direction=firestore.Query.DESCENDING).limit(20).stream()
         
         user_sessions = []
         for doc in docs:
@@ -166,10 +227,14 @@ def get_user_sessions():
             session_id = doc.id
             stored_user_id = doc_data.get('user_id', '')
             
-            # 检查是否属于当前用户，且不是当前会话
-            if (user_id[:8] in stored_user_id and 
-                session_id != current_session and 
-                doc_data.get('messages')):
+            # 提取存储的用户ID核心部分
+            stored_core = stored_user_id.split('_')[1] if '_' in stored_user_id else ''
+            
+            # 检查是否属于当前用户
+            if (stored_core == user_core or stored_user_id == user_id) and doc_data.get('messages'):
+                # 如果不包含当前会话，则跳过
+                if not include_current and session_id == current_session:
+                    continue
                 
                 messages = doc_data.get('messages', [])
                 last_message = ""
@@ -190,27 +255,33 @@ def get_user_sessions():
         st.sidebar.error(f"获取会话列表失败: {e}")
         return []
 
+def get_latest_user_session():
+    """获取用户最近的会话ID"""
+    try:
+        sessions = get_user_sessions(include_current=True)
+        if sessions:
+            return sessions[0]['id']
+        return None
+    except:
+        return None
+
 # ---------------------------- 自定义CSS ----------------------------
 st.markdown("""
 <style>
     .stChatMessage {
         padding: 1rem;
     }
-    /* 用户消息气泡样式 */
     [data-testid="stChatMessage"] [data-testid="chatAvatarIcon-user"] {
         background-color: #4e79a7 !important;
     }
-    /* AI消息气泡样式 */
     [data-testid="stChatMessage"] [data-testid="chatAvatarIcon-assistant"] {
         background-color: #f28e2c !important;
     }
-    /* 主标题样式 */
     .main-title {
         text-align: center;
         color: #4e79a7;
         margin-bottom: 0.5rem;
     }
-    /* 副标题样式 */
     .subtitle {
         text-align: center;
         color: #6b6b6b;
@@ -246,6 +317,9 @@ OPENING_TEMPLATE = "你好，我是一面镜子。在这里思考，亦看见你
 SYSTEM_PROMPT = BACKGROUND_SETTING + "\n" + TASK_DIRECTIVE
 
 # ---------------------------- 初始化会话状态 ----------------------------
+# 初始化用户ID（使用localStorage）
+init_user_id()
+
 if "api_key_configured" not in st.session_state:
     st.session_state.api_key_configured = False
 if "client" not in st.session_state:
@@ -267,7 +341,13 @@ if "messages" not in st.session_state:
         st.session_state.messages = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ] + loaded_messages
-        st.sidebar.success(f"✅ {load_message} (共{len(loaded_messages)}条消息)")
+        
+        # 检查是否是自动恢复
+        latest_session = get_latest_user_session()
+        if current_session_id == latest_session and len(loaded_messages) > 1:
+            st.sidebar.success(f"✅ 已自动恢复最近对话 (共{len(loaded_messages)}条)")
+        else:
+            st.sidebar.success(f"✅ {load_message} (共{len(loaded_messages)}条)")
     else:
         # 创建新对话
         st.session_state.messages = [
@@ -281,7 +361,6 @@ if "messages" not in st.session_state:
 if 'DEEPSEEK_API_KEY' in st.secrets and not st.session_state.api_key_configured:
     try:
         client = OpenAI(api_key=st.secrets['DEEPSEEK_API_KEY'], base_url="https://api.deepseek.com")
-        # 简单测试
         test_response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": "测试"}],
@@ -330,9 +409,9 @@ with st.sidebar:
     st.subheader("📁 会话管理")
     
     # 显示历史会话
-    user_sessions = get_user_sessions()
+    user_sessions = get_user_sessions(include_current=False)
     if user_sessions:
-        st.write("**历史对话:**")
+        st.write("**其他历史对话:**")
         for i, session in enumerate(user_sessions[:5]):
             time_str = "未知"
             if session['time']:
@@ -358,7 +437,7 @@ with st.sidebar:
             if session['preview']:
                 st.caption(f"💭 {session['preview']}")
     else:
-        st.caption("暂无历史对话")
+        st.caption("暂无其他历史对话")
     
     # 新建会话按钮
     if st.button("🆕 新建会话"):
@@ -378,6 +457,7 @@ with st.sidebar:
     
     st.divider()
     st.caption("💡 对话会自动保存到云端")
+    st.caption("🔐 您的数据安全存储，仅您可见")
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
