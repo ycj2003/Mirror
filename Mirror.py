@@ -53,59 +53,59 @@ st.set_page_config(
 )
 
 # ---------------------------- 稳定的用户身份管理（修复版） ----------------------------
-def init_user_id():
-    """从浏览器localStorage初始化或获取用户ID"""
-    # JavaScript代码：从localStorage获取或创建用户ID
-    get_user_id_script = """
+def get_user_id():
+    """获取稳定的用户ID - 优先使用URL参数"""
+    # 1. 优先从URL参数获取（localStorage会设置到这里）
+    if 'user_id' in st.query_params:
+        user_id = st.query_params['user_id']
+        if user_id and user_id.startswith('user_'):
+            st.session_state.user_id = user_id
+            return user_id
+    
+    # 2. 从session_state获取
+    if 'user_id' in st.session_state and st.session_state.user_id:
+        # 确保URL参数也有
+        if 'user_id' not in st.query_params:
+            st.query_params['user_id'] = st.session_state.user_id
+        return st.session_state.user_id
+    
+    # 3. 创建新用户ID
+    new_user_id = f"user_{int(time.time())}_{str(uuid4())[:9]}"
+    st.session_state.user_id = new_user_id
+    st.query_params['user_id'] = new_user_id
+    
+    return new_user_id
+
+def inject_user_id_script():
+    """注入JavaScript脚本来管理localStorage中的用户ID"""
+    user_id_script = """
     <script>
     (function() {
-        let userId = localStorage.getItem('mirror_user_id');
-        if (!userId) {
-            // 生成新的用户ID
-            userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-            localStorage.setItem('mirror_user_id', userId);
-        }
-        
-        // 将用户ID发送给Streamlit
-        window.parent.postMessage({
-            type: 'MIRROR_USER_ID',
-            userId: userId
-        }, '*');
-        
-        // 同时设置到URL参数中作为备份
+        // 从URL获取user_id参数
         const urlParams = new URLSearchParams(window.location.search);
-        if (!urlParams.has('user_id')) {
-            urlParams.set('user_id', userId);
+        let userId = urlParams.get('user_id');
+        
+        // 从localStorage获取存储的user_id
+        let storedUserId = localStorage.getItem('mirror_user_id');
+        
+        if (storedUserId && !userId) {
+            // 如果localStorage有ID但URL没有，将localStorage的ID设置到URL
+            urlParams.set('user_id', storedUserId);
             const newUrl = window.location.pathname + '?' + urlParams.toString();
             window.history.replaceState({}, '', newUrl);
+            // 刷新页面以让Streamlit获取到user_id
+            window.location.href = newUrl;
+        } else if (userId && userId !== storedUserId) {
+            // 如果URL有ID，同步到localStorage
+            localStorage.setItem('mirror_user_id', userId);
+        } else if (!userId && !storedUserId) {
+            // 都没有，等待Streamlit生成
+            // 不做任何操作
         }
     })();
     </script>
     """
-    components.html(get_user_id_script, height=0)
-
-def get_user_id():
-    """获取稳定的用户ID"""
-    # 优先从session_state获取
-    if 'user_id' in st.session_state and st.session_state.user_id:
-        return st.session_state.user_id
-    
-    # 从URL参数获取（localStorage的备份）
-    if 'user_id' in st.query_params:
-        user_id = st.query_params['user_id']
-        if user_id.startswith('user_'):
-            st.session_state.user_id = user_id
-            return user_id
-    
-    # 如果都没有，生成一个临时ID（等待JavaScript返回真实ID）
-    if 'temp_user_id' not in st.session_state:
-        temp_id = f"user_{int(time.time())}_{str(uuid4())[:8]}"
-        st.session_state.temp_user_id = temp_id
-        # 设置到URL参数中
-        st.query_params['user_id'] = temp_id
-        st.session_state.user_id = temp_id
-    
-    return st.session_state.temp_user_id
+    components.html(user_id_script, height=0)
 
 # ---------------------------- 会话管理 ----------------------------
 def get_session_id():
@@ -116,15 +116,42 @@ def get_session_id():
     if 'session_id' in st.query_params:
         session_id = st.query_params['session_id']
         # 验证会话ID格式
-        if 'user_' in session_id and '_' in session_id:
+        if 'user_' in session_id and session_id.count('_') >= 2:
             st.session_state.current_session_id = session_id
             return session_id
     
     # 2. 检查session_state中是否已有会话ID
     if hasattr(st.session_state, 'current_session_id') and st.session_state.current_session_id:
+        # 确保URL参数也有
+        if 'session_id' not in st.query_params:
+            st.query_params['session_id'] = st.session_state.current_session_id
         return st.session_state.current_session_id
     
-    # 3. 创建新会话ID（移除了递归调用）
+    # 3. 尝试从Firebase加载该用户最近的会话
+    if st.session_state.get('db_initialized') and db:
+        try:
+            # 提取用户ID核心部分
+            user_core = user_id.split('_')[1] if '_' in user_id and len(user_id.split('_')) > 1 else user_id
+            
+            # 查询最近1个会话
+            docs = db.collection("conversations").order_by('last_updated', direction=firestore.Query.DESCENDING).limit(5).stream()
+            
+            for doc in docs:
+                doc_data = doc.to_dict()
+                stored_user_id = doc_data.get('user_id', '')
+                
+                # 检查是否属于当前用户
+                if user_id == stored_user_id or (user_core and user_core in stored_user_id):
+                    # 找到了用户最近的会话
+                    latest_session_id = doc.id
+                    st.session_state.current_session_id = latest_session_id
+                    st.query_params['session_id'] = latest_session_id
+                    return latest_session_id
+        except Exception as e:
+            # 静默处理错误，继续创建新会话
+            pass
+    
+    # 4. 创建新会话ID
     timestamp = int(time.time())
     random_part = str(uuid4())[:6]
     new_session_id = f"{user_id}_{timestamp}_{random_part}"
@@ -315,8 +342,8 @@ OPENING_TEMPLATE = "你好，我是一面镜子。在这里思考，亦看见你
 SYSTEM_PROMPT = BACKGROUND_SETTING + "\n" + TASK_DIRECTIVE
 
 # ---------------------------- 初始化会话状态 ----------------------------
-# 初始化用户ID（使用localStorage）
-init_user_id()
+# 注入用户ID管理脚本
+inject_user_id_script()
 
 if "api_key_configured" not in st.session_state:
     st.session_state.api_key_configured = False
@@ -340,12 +367,12 @@ if "messages" not in st.session_state:
             {"role": "system", "content": SYSTEM_PROMPT}
         ] + loaded_messages
         
-        # 检查是否是自动恢复
-        latest_session = get_latest_user_session()
-        if current_session_id == latest_session and len(loaded_messages) > 1:
-            st.sidebar.success(f"✅ 已自动恢复最近对话 (共{len(loaded_messages)}条)")
+        # 判断是否是自动恢复的会话
+        is_auto_restored = 'session_id' not in st.query_params or len(loaded_messages) > 1
+        if is_auto_restored:
+            st.sidebar.success(f"✅ 已自动恢复对话 (共{len(loaded_messages)}条)")
         else:
-            st.sidebar.success(f"✅ {load_message} (共{len(loaded_messages)}条)")
+            st.sidebar.success(f"✅ 已加载对话 (共{len(loaded_messages)}条)")
     else:
         # 创建新对话
         st.session_state.messages = [
